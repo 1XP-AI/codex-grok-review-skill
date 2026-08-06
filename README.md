@@ -18,7 +18,7 @@ endpoint from issue comments.
 
 ```bash
 gh pr view 123 --json comments -q '[.comments[].author.login] | unique'
-# ["someuser","vercel"]      ← the Codex bot is absent
+# ["someuser","some-ci-bot"]   ← the Codex bot is absent
 ```
 
 The human-readable `gh pr view 123 --comments` *does* render them, but as
