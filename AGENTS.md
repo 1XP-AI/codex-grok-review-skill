@@ -33,10 +33,15 @@ composing `gh` calls by hand.
    never vouch for a specific commit.
 
 4. **Distinguish live findings from re-anchored ones.** GitHub moves old comments onto
-   new line numbers, so resolved findings look current. A finding is live only when
-   both hold:
-   - `line != null` (otherwise the code it referenced is gone), and
-   - `created_at` is newer than the PR's newest commit date.
+   new line numbers, so resolved findings look current. Do not settle this with
+   timestamps — **every** Codex output carries `Reviewed commit: <sha>`, including the
+   findings review body. Join each inline comment to its review through
+   `pull_request_review_id`, read that review's SHA, and treat the finding as live only
+   when:
+   - that SHA is the PR's newest commit, and
+   - `line != null` (otherwise the code it referenced is gone).
+
+   Fall back to `created_at` only when an output carries no hash.
 
 5. **Reproduce a finding before fixing it.** It is a hypothesis about the code, not a
    verdict. If it does not reproduce, report that with evidence instead of applying a

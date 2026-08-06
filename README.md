@@ -84,14 +84,38 @@ gh api repos/OWNER/REPO/issues/123/comments \
 GitHub keeps review comments attached to a PR as it changes, moving them to new line
 numbers. A finding you already fixed reappears pointing at a plausible-looking line.
 
-Two fields separate live findings from dead ones:
+Do **not** settle this with timestamps. `Reviewed commit` appears on *every* Codex
+output — the findings review body too, not just clean verdicts:
 
-| Field | Meaning |
+```
+### 💡 Codex Review
+Here are some automated review suggestions for this pull request.
+
+**Reviewed commit:** `6b8109667e`
+```
+
+Each inline finding carries `pull_request_review_id`, so you can join it to its review
+and read the exact commit it was written against:
+
+```bash
+# review id → reviewed commit
+gh api repos/OWNER/REPO/pulls/123/reviews \
+  -q '.[] | select(.user.login|startswith("chatgpt-codex-connector"))
+          | "\(.id) \(.body | capture("Reviewed commit:\\*\\*\\s*`(?<s>[0-9a-f]+)`") | .s)"'
+
+# finding → its review
+gh api repos/OWNER/REPO/pulls/123/comments \
+  -q '.[] | "\(.id) review=\(.pull_request_review_id) line=\(.line)"'
+```
+
+A finding is **live** only when both hold:
+
+| Condition | Why |
 |---|---|
-| `line == null` | GitHub could no longer anchor it — the code it referenced is gone |
-| `created_at` earlier than the newest commit | It predates your fix; likely already addressed |
+| its review's `Reviewed commit` is the PR's newest commit | otherwise it was written against code you have since changed |
+| `line != null` | otherwise GitHub could no longer place it — the code is gone |
 
-Compare `created_at` against the newest commit date, not against "now".
+Timestamps are only a fallback for outputs with no hash.
 
 ---
 

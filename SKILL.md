@@ -36,9 +36,11 @@ Exit codes for `status` / `findings`:
    **`Reviewed commit: <sha>`**. Never match the sign-off (it varies); match
    `Didn't find any major issues`, then check that the SHA is the PR's newest commit —
    an older clean verdict does not vouch for code pushed since.
-4. **Old findings get re-anchored to new line numbers** and look current. A finding is
-   live only when `line != null` **and** its `created_at` is newer than the PR's newest
-   commit.
+4. **Old findings get re-anchored to new line numbers** and look current. Settle it by
+   commit, not by time: every Codex output (findings review *and* clean verdict) states
+   **`Reviewed commit: <sha>`**. Join a finding to its review via
+   `pull_request_review_id`, then read that review's SHA. A finding is live only when
+   that SHA is the PR's newest commit **and** `line != null`.
 
 ## Procedure
 

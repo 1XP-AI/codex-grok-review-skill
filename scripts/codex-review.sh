@@ -69,36 +69,64 @@ head_commit_date() {
     -q 'map(.commit.committer.date // .commit.author.date) | max // ""'
 }
 
-# All inline review comments authored by the Codex bot, enriched:
-#   severity  P1|P2|P3|—   (parsed from the badge image alt text)
-#   title     the bolded finding headline
-#   stale     true when the comment predates the newest commit
-#   outdated  true when GitHub could no longer anchor it (line == null)
-fetch_findings() {
-  local repo="$1" pr="$2" head_date="$3"
-  gh api "repos/$repo/pulls/$pr/comments" --paginate \
+# review id → the commit that review inspected. Every Codex output states it as
+#   **Reviewed commit:** `<sha10>`
+# which is far better than guessing from timestamps.
+review_shas() {
+  gh api "repos/$1/pulls/$2/reviews" --paginate \
     -q "[ .[]
           | select(.user.login | startswith(\"$BOT\"))
-          | {
-              id, path,
-              line: (.line // .original_line),
-              anchored: (.line != null),
-              created_at,
-              url: .html_url,
-              severity: (
-                (.body | capture(\"!\\\\[(?<sev>P[0-9]) Badge\\\\]\") | .sev) // \"—\"
-              ),
-              title: (
-                (.body
-                  | gsub(\"<[^>]*>\"; \"\")
-                  | gsub(\"!\\\\[[^]]*\\\\]\\\\([^)]*\\\\)\"; \"\")
-                  | capture(\"\\\\*\\\\*(?<t>[^*]+)\\\\*\\\\*\") | .t)
-                // \"(untitled)\"
-              ) | sub(\"^\\\\s+\"; \"\") | sub(\"\\\\s+$\"; \"\"),
-              body: .body
-            }
-          | . + { stale: (.created_at < \"$head_date\") }
-        ] | sort_by(.created_at) | reverse"
+          | { key: (.id | tostring),
+              value: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
+        ] | from_entries"
+}
+
+# All inline review comments authored by the Codex bot, enriched:
+#   severity     P1|P2|P3|—   (from the badge image alt text)
+#   title        the bolded finding headline
+#   reviewed_sha the commit its parent review inspected
+#   stale        true when that commit is NOT the PR's newest
+#   anchored     false when GitHub could no longer place it (line == null)
+fetch_findings() {
+  local repo="$1" pr="$2" head_date="$3" head_sha="$4" shamap
+  shamap="$(review_shas "$repo" "$pr")"
+  gh api "repos/$repo/pulls/$pr/comments" --paginate \
+    --jq "[ .[] | select(.user.login | startswith(\"$BOT\")) ]" \
+  | jq --argjson shas "$shamap" --arg head "$head_sha" --arg headdate "$head_date" '
+      [ .[]
+        | {
+            id, path,
+            line: (.line // .original_line),
+            anchored: (.line != null),
+            created_at,
+            url: .html_url,
+            review_id: (.pull_request_review_id | tostring),
+            severity: ((.body | capture("!\\[(?<sev>P[0-9]) Badge\\]") | .sev) // "—"),
+            title: (
+              ((.body
+                | gsub("<[^>]*>"; "")
+                | gsub("!\\[[^]]*\\]\\([^)]*\\)"; "")
+                | capture("\\*\\*(?<t>[^*]+)\\*\\*") | .t) // "(untitled)")
+              | sub("^\\s+"; "") | sub("\\s+$"; "")
+            ),
+            body: .body
+          }
+        | . + { reviewed_sha: ($shas[.review_id] // "") }
+        | . + {
+            # Prefer an exact commit match; fall back to dates only when the
+            # review body carried no hash. Bind reviewed_sha BEFORE piping into
+            # $head — a pipe rebinds `.` to the string and .reviewed_sha would
+            # then be an index into it.
+            stale: (
+              . as $c
+              | if $c.reviewed_sha != "" and $head != "" then
+                  ($head | startswith($c.reviewed_sha)) | not
+                else
+                  $c.created_at < $headdate
+                end
+            )
+          }
+      ] | sort_by(.created_at) | reverse'
 }
 
 # Codex leaves NO review object when it has nothing to say — it reacts 👍 on the
@@ -144,15 +172,17 @@ latest_review_date() {
 sev_rank() { case "$1" in P1) echo 1;; P2) echo 2;; P3) echo 3;; *) echo 9;; esac; }
 
 cmd_json() {
-  local repo pr head; repo="$(resolve_repo)"; pr="$1"; head="$(head_commit_date "$repo" "$pr")"
-  fetch_findings "$repo" "$pr" "$head"
+  local repo pr head head_sha
+  repo="$(resolve_repo)"; pr="$1"
+  head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
+  fetch_findings "$repo" "$pr" "$head" "$head_sha"
 }
 
 print_findings() {
-  local repo pr head all json count
+  local repo pr head head_sha all json count
   repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"
-  head="$(head_commit_date "$repo" "$pr")"
-  json="$(fetch_findings "$repo" "$pr" "$head")"
+  head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
+  json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
 
   if [ "$all" = "open" ]; then
     json="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)]')"
@@ -165,10 +195,19 @@ print_findings() {
   fi
 
   printf '%s' "$json" | jq -r '
-    .[] |
-    "[\(.severity)] \(.path):\(.line)\(if .stale then "  (STALE — predates newest commit)" else "" end)\(if .anchored then "" else "  (OUTDATED — code removed)" end)\n" +
-    "      \(.title)\n" +
-    "      \(.url)\n"'
+    .[]
+    | . + {
+        staleNote: (
+          if .stale | not then ""
+          elif .reviewed_sha != "" then "  (STALE — reviewed \(.reviewed_sha))"
+          else "  (STALE — predates newest commit)"
+          end
+        ),
+        anchorNote: (if .anchored then "" else "  (OUTDATED — code removed)" end)
+      }
+    | "[\(.severity)] \(.path):\(.line)\(.staleNote)\(.anchorNote)\n" +
+      "      \(.title)\n" +
+      "      \(.url)\n"'
 }
 
 cmd_status() {
@@ -177,7 +216,7 @@ cmd_status() {
   repo="$(resolve_repo)"; pr="$1"
   head="$(head_commit_date "$repo" "$pr")"
   head_sha="$(head_commit_sha "$repo" "$pr")"
-  json="$(fetch_findings "$repo" "$pr" "$head")"
+  json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
   open="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)] | length')"
   p1="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true and .severity == "P1")] | length')"
   reviews="$(review_count "$repo" "$pr")"
