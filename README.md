@@ -212,10 +212,14 @@ $ codex-review all 545
       Restore focus to a control that survives the state change
       https://github.com/owner/repo/pull/545#discussion_r...
 
-[P2] src/styles/app.css:2542  (STALE — predates newest commit)  (OUTDATED — code removed)
+[P2] src/styles/app.css:2542  (STALE — reviewed 6b8109667e)  (OUTDATED — code removed)
       Hide the backdrop when no menu remains visible
       https://github.com/owner/repo/pull/545#discussion_r...
 ```
+
+The stale note names the commit that finding was written against, so you can see at a
+glance that it predates the fix you pushed. When an output carried no hash, it falls
+back to `(STALE — predates newest commit)`.
 
 ---
 
