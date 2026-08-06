@@ -31,9 +31,11 @@ Exit codes for `status` / `findings`:
    not issue comments. Correct source: `gh api repos/O/R/pulls/N/comments`.
 2. **Severity is a markdown image badge.** Stripping "markdown noise" deletes the
    `P1`/`P2`/`P3` you need to decide whether to merge — and it fails silently.
-3. **No findings ⇒ no review object, only a 👍 reaction on the PR.** So zero reviews
-   means either *not reviewed* or *reviewed clean*. Only
-   `gh api repos/O/R/issues/N/reactions` tells them apart.
+3. **No findings ⇒ no review object.** The verdict is an *issue* comment:
+   `Codex Review: Didn't find any major issues. <random sign-off>` plus
+   **`Reviewed commit: <sha>`**. Never match the sign-off (it varies); match
+   `Didn't find any major issues`, then check that the SHA is the PR's newest commit —
+   an older clean verdict does not vouch for code pushed since.
 4. **Old findings get re-anchored to new line numbers** and look current. A finding is
    live only when `line != null` **and** its `created_at` is newer than the PR's newest
    commit.

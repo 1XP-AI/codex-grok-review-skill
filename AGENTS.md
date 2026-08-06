@@ -19,10 +19,18 @@ composing `gh` calls by hand.
    fails silently.
 
 3. **Absence of a review is ambiguous.** With nothing to report, Codex submits **no
-   review** and reacts `+1` on the PR instead. Check
-   `gh api repos/OWNER/REPO/issues/N/reactions` before concluding either
-   "not reviewed" or "reviewed clean". Reactions are untimestamped, so an existing 👍
-   does not prove your newest commit was reviewed.
+   review**. It leaves an *issue* comment instead:
+
+   ```
+   Codex Review: Didn't find any major issues. Breezy!
+   **Reviewed commit:** `d94a859dde`
+   ```
+
+   The sign-off is randomised (`Bravo.`, `Breezy!`, `Keep them coming!`, …) — match the
+   stable `Didn't find any major issues`, never the tail. Then compare
+   **`Reviewed commit`** against the PR's newest SHA: that hash is what proves which
+   commit was cleared. A `+1` reaction also appears but is untimestamped, so it can
+   never vouch for a specific commit.
 
 4. **Distinguish live findings from re-anchored ones.** GitHub moves old comments onto
    new line numbers, so resolved findings look current. A finding is live only when

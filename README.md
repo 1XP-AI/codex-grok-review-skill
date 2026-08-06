@@ -43,24 +43,41 @@ Cleaning "markdown noise" with something like
 rule is "no P1 findings", stripping the badge makes that rule unenforceable — and it
 fails silently, because the text still reads fine.
 
-### 3. No findings ⇒ **no review object at all**, only a 👍 reaction
+### 3. No findings ⇒ **no review object at all** — the verdict is an issue comment
 
-When Codex has nothing to say it does **not** submit a review. It reacts `+1` on the
-pull request.
+When Codex has nothing to say it does **not** submit a review. It leaves an *issue*
+comment and reacts `+1`:
 
 ```bash
-gh api repos/OWNER/REPO/pulls/123/reviews -q 'length'          # 0
-gh api repos/OWNER/REPO/issues/123/reactions \
-  -q '[.[] | select(.content=="+1") | .user.login]'            # ["chatgpt-codex-connector[bot]"]
+gh api repos/OWNER/REPO/pulls/123/reviews -q 'length'   # 0  ← looks unreviewed
 ```
 
-So **"zero reviews" is ambiguous**: it means either *not reviewed yet* or *reviewed
-and clean*. Only the reaction distinguishes them. Miss this and you either wait
-forever for a review that will never come, or merge something Codex never looked at.
+```
+Codex Review: Didn't find any major issues. Breezy!
 
-> Caveat: reactions carry no timestamp, so a 👍 cannot prove *which* commit was
-> reviewed. After pushing fixes, prefer requesting a fresh review over trusting an
-> older 👍.
+**Reviewed commit:** `d94a859dde`
+```
+
+So **"zero reviews" is ambiguous** — it means either *not reviewed yet* or *reviewed
+and clean*. Miss this and you either wait forever for a review that will never come,
+or merge something Codex never looked at.
+
+Two things about that comment matter:
+
+- **The sign-off is randomised.** Observed: `Bravo.` · `Breezy!` ·
+  `Keep them coming!` · `What shall we delve into next?` — matching on it will break.
+  Match the stable part: `Didn't find any major issues`.
+- **`Reviewed commit` names the exact SHA.** This is the single most valuable field on
+  a clean verdict: it proves *which* commit was cleared. A 👍 reaction carries no
+  timestamp and cannot. Always compare that SHA against the PR's newest commit —
+  otherwise an old clean verdict silently vouches for code Codex never saw.
+
+```bash
+gh api repos/OWNER/REPO/issues/123/comments \
+  -q '.[] | select(.user.login|startswith("chatgpt-codex-connector"))
+          | select(.body | test("[Dd]idn'"'"'t find any major issues"))
+          | .body' | head -3
+```
 
 ### 4. Old findings are re-anchored and look current
 
@@ -129,7 +146,7 @@ Add `--repo OWNER/REPO` outside a checkout.
 |---:|---|
 | 0 | Reviewed, no open findings |
 | 2 | Open findings exist |
-| 3 | Not reviewed yet (no review object, no 👍) |
+| 3 | Not reviewed yet, **or** the clean verdict names an older commit |
 | 4 | Reviewed; all findings stale/outdated — confirm they were addressed |
 
 ```bash
@@ -150,11 +167,21 @@ p1=$(codex-review json 123 \
 ```
 $ codex-review status 545
 PR #545  (owner/repo)
-  newest commit : 2026-08-06T04:44:48Z
+  newest commit : 2026-08-06T04:44:48Z  b28ef03af2
   codex reviews : 2  (latest 2026-08-06T04:50:57Z)
   codex 👍       : 0
+  clean verdict : none
   open findings : 1  (P1: 0)
   VERDICT       : 1 OPEN FINDING(S) — address before merging.
+
+$ codex-review status 549
+PR #549  (owner/repo)
+  newest commit : 2026-08-06T05:17:05Z  63eef57b93
+  codex reviews : 0
+  codex 👍       : 1
+  clean verdict : yes — reviewed commit 63eef57b93  (2026-08-06T05:19:57Z)
+  open findings : 0  (P1: 0)
+  VERDICT       : REVIEWED, CLEAN — verdict names the newest commit.
 
 $ codex-review all 545
 [P2] src/components/ConfirmDialog.tsx:68

@@ -109,6 +109,28 @@ has_thumbsup() {
     2>/dev/null || echo 0
 }
 
+# A clean review ALSO lands as an issue comment carrying the commit it inspected:
+#
+#   Codex Review: Didn't find any major issues. Breezy!
+#   **Reviewed commit:** `d94a859dde`
+#
+# The sign-off wanders ("Bravo.", "Breezy!", "Keep them coming!", …), so never match
+# on it. The `Reviewed commit` hash is the valuable part: unlike a 👍 reaction, it
+# proves WHICH commit was reviewed. Emits "<iso8601>\t<sha>" per clean verdict.
+clean_verdicts() {
+  gh api "repos/$1/issues/$2/comments" --paginate \
+    -q "[ .[]
+          | select(.user.login | startswith(\"$BOT\"))
+          | select(.body | test(\"[Dd]idn't find any major issues\"))
+          | { created_at, sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
+        ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\"" 2>/dev/null || true
+}
+
+# Full SHA of the PR's newest commit, for matching against `Reviewed commit`.
+head_commit_sha() {
+  gh api "repos/$1/pulls/$2/commits" --paginate -q '.[-1].sha // ""' 2>/dev/null || true
+}
+
 review_count() {
   gh api "repos/$1/pulls/$2/reviews" --paginate \
     -q "[.[] | select(.user.login | startswith(\"$BOT\"))] | length" 2>/dev/null || echo 0
@@ -150,9 +172,11 @@ print_findings() {
 }
 
 cmd_status() {
-  local repo pr head json open p1 reviews thumbs latest
+  local repo pr head head_sha json open p1 reviews thumbs latest
+  local clean clean_line clean_sha clean_at clean_matches_head
   repo="$(resolve_repo)"; pr="$1"
   head="$(head_commit_date "$repo" "$pr")"
+  head_sha="$(head_commit_sha "$repo" "$pr")"
   json="$(fetch_findings "$repo" "$pr" "$head")"
   open="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)] | length')"
   p1="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true and .severity == "P1")] | length')"
@@ -160,19 +184,47 @@ cmd_status() {
   thumbs="$(has_thumbsup "$repo" "$pr")"
   latest="$(latest_review_date "$repo" "$pr")"
 
+  clean="$(clean_verdicts "$repo" "$pr")"
+  clean_line="$(printf '%s' "$clean" | tail -n 1)"
+  clean_at="$(printf '%s' "$clean_line" | cut -f1)"
+  clean_sha="$(printf '%s' "$clean_line" | cut -f2)"
+  clean_matches_head=0
+  if [ -n "$clean_sha" ] && [ -n "$head_sha" ] && case "$head_sha" in "$clean_sha"*) true ;; *) false ;; esac; then
+    clean_matches_head=1
+  fi
+
   echo "PR #$pr  ($repo)"
-  echo "  newest commit : ${head:-unknown}"
+  echo "  newest commit : ${head:-unknown}  ${head_sha:0:10}"
   echo "  codex reviews : $reviews${latest:+  (latest $latest)}"
   echo "  codex 👍       : $thumbs"
+  if [ -n "$clean_sha" ]; then
+    echo "  clean verdict : yes — reviewed commit ${clean_sha}  ($clean_at)"
+  elif [ -n "$clean_line" ]; then
+    echo "  clean verdict : yes — but no commit hash in the comment"
+  else
+    echo "  clean verdict : none"
+  fi
   echo "  open findings : $open  (P1: $p1)"
 
-  if [ "$reviews" -eq 0 ] && [ "$thumbs" -eq 0 ]; then
-    echo "  VERDICT       : NOT REVIEWED — no review object and no 👍 reaction."
+  # A clean verdict naming the newest commit is the strongest possible signal.
+  if [ "$open" -eq 0 ] && [ "$clean_matches_head" -eq 1 ]; then
+    echo "  VERDICT       : REVIEWED, CLEAN — verdict names the newest commit."
+    return 0
+  fi
+
+  if [ "$reviews" -eq 0 ] && [ "$thumbs" -eq 0 ] && [ -z "$clean_line" ]; then
+    echo "  VERDICT       : NOT REVIEWED — no review, no 👍, no clean verdict."
     echo "                  Trigger one:  codex-review request $pr"
     return 3
   fi
+
   if [ "$open" -eq 0 ]; then
     local total; total="$(printf '%s' "$json" | jq 'length')"
+    if [ -n "$clean_sha" ] && [ "$clean_matches_head" -eq 0 ]; then
+      echo "  VERDICT       : STALE CLEAN VERDICT — it names ${clean_sha}, not the newest commit."
+      echo "                  Newer commits are unreviewed:  codex-review request $pr"
+      return 3
+    fi
     if [ "$total" -gt 0 ]; then
       echo "  VERDICT       : REVIEWED — $total finding(s), all stale/outdated."
       echo "                  Confirm they are addressed, then merge."
@@ -181,6 +233,7 @@ cmd_status() {
     echo "  VERDICT       : REVIEWED, CLEAN."
     return 0
   fi
+
   echo "  VERDICT       : $open OPEN FINDING(S) — address before merging."
   [ "$p1" -gt 0 ] && echo "                  ⚠ $p1 of them are P1."
   return 2
@@ -201,24 +254,31 @@ cmd_wait() {
   deadline="${CODEX_REVIEW_TIMEOUT:-1800}"
   interval="${CODEX_REVIEW_INTERVAL:-60}"
   elapsed=0
-  echo "Waiting for a Codex review submitted after $head (timeout ${deadline}s)..."
+  local head_sha clean_sha
+  head_sha="$(head_commit_sha "$repo" "$pr")"
+  echo "Waiting for a Codex verdict on ${head_sha:0:10} (after $head, timeout ${deadline}s)..."
   while [ "$elapsed" -lt "$deadline" ]; do
+    # Strongest signal: a clean verdict naming this exact commit.
+    clean_sha="$(clean_verdicts "$repo" "$pr" | tail -n 1 | cut -f2)"
+    if [ -n "$clean_sha" ] && [ -n "$head_sha" ] \
+       && case "$head_sha" in "$clean_sha"*) true ;; *) false ;; esac; then
+      echo "Clean verdict for ${clean_sha}."
+      cmd_status "$pr" || true
+      return 0
+    fi
     latest="$(latest_review_date "$repo" "$pr")"
-    thumbs="$(has_thumbsup "$repo" "$pr")"
     if [ -n "$latest" ] && [ "$latest" \> "$head" ]; then
       echo "Review landed at $latest."
       cmd_status "$pr" || true
       return 0
     fi
-    if [ "$thumbs" -gt 0 ]; then
-      # 👍 carries no timestamp, so it cannot prove which commit was reviewed.
-      echo "Codex reacted 👍 (no findings). Note: reactions are untimestamped —"
-      echo "verify it followed your newest commit before treating it as a pass."
-      return 0
-    fi
     sleep "$interval"
     elapsed=$((elapsed + interval))
   done
+  # A 👍 alone is untimestamped and cannot vouch for a specific commit, so it is
+  # never treated as success here — only reported.
+  thumbs="$(has_thumbsup "$repo" "$pr")"
+  [ "$thumbs" -gt 0 ] && echo "(a 👍 reaction exists, but it is untimestamped — it cannot prove which commit was reviewed)" >&2
   echo "Timed out after ${deadline}s with no new review." >&2
   return 1
 }
