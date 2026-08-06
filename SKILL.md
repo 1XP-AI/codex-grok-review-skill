@@ -56,7 +56,9 @@ Exit codes for `status` / `findings`:
    well-argued rebuttal is a legitimate outcome, and "fixing" a phantom can mask the
    real cause.
 4. **Fix, run the repo's own gates, push.**
-5. **Re-request.** `request <pr>`. Findings do not clear themselves and a push does not
+5. **Re-request, then let it wake you.** `request <pr>`, and run `wait <pr>` as a
+   **background** job rather than polling `status` — its exit is the signal that a
+   verdict landed. Tune with `CODEX_REVIEW_TIMEOUT` / `CODEX_REVIEW_INTERVAL`. Findings do not clear themselves and a push does not
    notify Codex.
 6. **Re-check before merging.** `status <pr>` again. If your merge policy is
    "no P1 blocks", gate on severity:
@@ -65,6 +67,15 @@ Exit codes for `status` / `findings`:
    scripts/codex-review.sh json <pr> \
      | jq '[.[] | select(.stale==false and .anchored==true and .severity=="P1")] | length'
    ```
+
+## Before acting on findings, check the PR is real
+
+GitHub diffs a PR against its **merge base**, so a branch whose changes already landed
+(squash-merged, cherry-picked) still shows a full diff and Codex reviews it as new
+code. `git branch --contains` does not settle it — squash-merge rewrites the commit.
+Compare content: `git diff --stat origin/main origin/<branch> -- <paths>`. Empty means
+duplicate — close it. The finding may still be valid against `main`; fix it on a fresh
+branch.
 
 ## Reporting findings to a human
 

@@ -9,7 +9,7 @@ memory.
 
 ---
 
-## The four traps
+## The five traps
 
 ### 1. `gh pr view --json comments` does not contain review findings
 
@@ -118,6 +118,29 @@ A finding is **live** only when both hold:
 | `line != null` | otherwise GitHub could no longer place it — the code is gone |
 
 Timestamps are a last resort, for outputs that name no commit at all.
+
+### 5. A PR's diff is against the merge base, not against `main`
+
+Not a Codex behaviour, but it decides whether a finding is worth acting on. GitHub
+computes a PR's diff from where the branch forked. A branch whose changes already
+landed — squash-merged, cherry-picked — still shows a full diff, and Codex will
+review it as new code.
+
+Ancestry does not settle it, because squash-merge rewrites the commit:
+
+```bash
+git branch -r --contains <sha>     # main absent — proves nothing after a squash merge
+```
+
+Compare content instead:
+
+```bash
+git diff --stat origin/main origin/<branch> -- <paths the PR touches>
+# empty → already on main; the PR is a duplicate no matter what its diff shows
+```
+
+Worth doing before you spend time on findings: the finding may be real while the PR
+is not.
 
 ---
 
@@ -264,6 +287,26 @@ $ codex-review all 545
 The stale note names the commit that finding was written against, so you can see at a
 glance that it predates the fix you pushed. When an output carried no hash, it falls
 back to `(STALE — predates newest commit)`.
+
+---
+
+## Don't poll — get woken up
+
+`wait` blocks until a verdict lands for your newest commit. Backgrounded, that turns
+a review into a **push**: an agent that starts it goes on to other work and is
+re-invoked the moment the review arrives, instead of re-checking on a timer.
+
+```bash
+codex-review request 123
+CODEX_REVIEW_TIMEOUT=2400 CODEX_REVIEW_INTERVAL=45 codex-review wait 123 &
+# … keep working. The exit wakes whatever is watching the job.
+```
+
+In Claude Code, run `wait` as a background Bash task — completion notifies the agent.
+Tunables: `CODEX_REVIEW_TIMEOUT` (default 1800s) and `CODEX_REVIEW_INTERVAL`
+(default 60s). `wait` succeeds on a clean verdict naming your head commit **or** on a
+review submitted after it, so it fires for both outcomes; call `status` afterwards to
+find out which.
 
 ---
 

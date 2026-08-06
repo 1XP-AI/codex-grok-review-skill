@@ -55,10 +55,21 @@ composing `gh` calls by hand.
    speculative fix — a wrong fix can bury the real cause. A well-argued rebuttal is a
    legitimate outcome.
 
-7. **Re-request a review after pushing fixes.** Findings do not clear themselves and a
+7. **Check that the PR is real before acting on its findings.** GitHub diffs a PR
+   against its merge base, so a branch whose changes already landed still shows a
+   full diff and gets reviewed as new code. `git branch --contains` does not settle
+   it — squash-merge rewrites the commit. Compare content:
+   `git diff --stat origin/main origin/<branch> -- <paths>`; empty means duplicate.
+   The finding can be valid while the PR is not — fix it on a branch off `main`.
+
+8. **Prefer being woken to polling.** `wait` blocks until a verdict lands for the
+   newest commit. Run it as a background job and continue other work; its exit is the
+   signal. Do not re-run `status` on a timer.
+
+9. **Re-request a review after pushing fixes.** Findings do not clear themselves and a
    push does not notify Codex. Post `@codex review` again, then re-check.
 
-8. **Report severity, location, and reproduction status** to the human. Do not claim a
+10. **Report severity, location, and reproduction status** to the human. Do not claim a
    PR passed review based on the absence of findings alone.
 
 ## Loop
