@@ -79,13 +79,29 @@ gh api repos/OWNER/REPO/issues/123/comments \
           | .body' | head -3
 ```
 
-### 4. Old findings are re-anchored and look current
+### 4. Old findings are re-anchored — and `commit_id` lies about it
 
-GitHub keeps review comments attached to a PR as it changes, moving them to new line
-numbers. A finding you already fixed reappears pointing at a plausible-looking line.
+GitHub keeps review comments attached to a PR as it changes, moving them onto new
+line numbers. A finding you already fixed reappears pointing at a plausible line.
 
-Do **not** settle this with timestamps. `Reviewed commit` appears on *every* Codex
-output — the findings review body too, not just clean verdicts:
+The obvious field to check is `commit_id`. **It is the wrong one.** GitHub drags it
+forward when it re-anchors a comment, so a finding written against an old commit
+reports the newest one:
+
+```bash
+# a review whose body says it inspected 6b8109667e
+gh api repos/OWNER/REPO/pulls/123/comments \
+  -q '.[] | "commit_id=\(.commit_id[0:10])  original_commit_id=\(.original_commit_id[0:10])"'
+# commit_id=b28ef03af2  original_commit_id=6b8109667e   ← .commit_id moved. It is now the HEAD sha.
+# commit_id=b28ef03af2  original_commit_id=6b8109667e
+```
+
+Use **`original_commit_id`** — it never moves, and across every PR measured it equals
+the `Reviewed commit` hash in the parent review's body. It is an API contract rather
+than a markdown format, so prefer it over parsing the body.
+
+For reference, the body does state it too, on *every* Codex output — the findings
+review, not just clean verdicts:
 
 ```
 ### 💡 Codex Review
@@ -94,28 +110,54 @@ Here are some automated review suggestions for this pull request.
 **Reviewed commit:** `6b8109667e`
 ```
 
-Each inline finding carries `pull_request_review_id`, so you can join it to its review
-and read the exact commit it was written against:
-
-```bash
-# review id → reviewed commit
-gh api repos/OWNER/REPO/pulls/123/reviews \
-  -q '.[] | select(.user.login|startswith("chatgpt-codex-connector"))
-          | "\(.id) \(.body | capture("Reviewed commit:\\*\\*\\s*`(?<s>[0-9a-f]+)`") | .s)"'
-
-# finding → its review
-gh api repos/OWNER/REPO/pulls/123/comments \
-  -q '.[] | "\(.id) review=\(.pull_request_review_id) line=\(.line)"'
-```
-
 A finding is **live** only when both hold:
 
 | Condition | Why |
 |---|---|
-| its review's `Reviewed commit` is the PR's newest commit | otherwise it was written against code you have since changed |
+| `original_commit_id` is the PR's newest commit | otherwise it was written against code you have since changed |
 | `line != null` | otherwise GitHub could no longer place it — the code is gone |
 
-Timestamps are only a fallback for outputs with no hash.
+Timestamps are a last resort, for outputs that name no commit at all.
+
+---
+
+## Reading a finding fast
+
+A finding is three things: **why it is a bug**, **what to change**, and **where**.
+`detail` extracts all three, so you can start editing without opening the browser.
+
+```
+$ codex-review detail 123
+────────────────────────────────────────────────────────────────────────
+[P2]  src/components/TopNav.tsx:316-317
+       Make the dropdown scroll within short viewports
+
+  WHY  When the actions are appended after the 7–9 navigation links, the
+       dropdown can exceed the available height on landscape phones and
+       other short viewports. The absolutely positioned `.nav__links` has
+       neither a viewport-relative `max-height` nor vertical scrolling.
+
+  FIX  constrain the dropdown to the space below the 64px header and
+       enable `overflow-y: auto`.
+
+  CODE
+        …
+             </li>
+           ))}
+    »» +    {isRandomWallet && (
+
+  LINK https://github.com/owner/repo/pull/123#discussion_r...
+```
+
+- **WHY** — the rationale, with the badge markup and the `Useful?` footer removed.
+- **FIX** — Codex states the prescription in its final sentence, after a `;` or a
+  `, so` when that sentence also diagnoses the cause. Extracted heuristically, and
+  printed *next to* the full rationale so a bad guess is visible and harmless.
+- **CODE** — the `diff_hunk` GitHub attaches to the comment. The hunk **ends at** the
+  commented line, so the tail is the relevant part; `»»` marks the anchor line.
+- Findings are grouped by file and ordered by line, so each file is opened once.
+
+Set `CODEX_REVIEW_CONTEXT` to change how many lines of code context are shown.
 
 ---
 
@@ -153,7 +195,9 @@ this README. The rules are tool-agnostic; only the wrapper is bash.
 
 ```bash
 codex-review status 123      # one-line verdict + counts
-codex-review findings 123    # open findings only, with severity
+codex-review findings 123    # open findings only, one line each
+codex-review detail 123      # open findings in full: why, what to fix, the code
+codex-review detail-all 123  # same, including stale ones
 codex-review all 123         # everything, incl. stale/outdated
 codex-review json 123        # machine-readable, for agents
 codex-review request 123     # post "@codex review"

@@ -21,7 +21,9 @@ codex-review — read Codex PR review findings, and request re-reviews.
 
 USAGE
   codex-review status <pr>     One-line verdict: has Codex reviewed? any open findings?
-  codex-review findings <pr>   Open findings, newest first, with severity + staleness
+  codex-review findings <pr>   Open findings, one line each, with severity + staleness
+  codex-review detail <pr>     Open findings in full: rationale, prescribed fix, code
+  codex-review detail-all <pr> Same, including stale/outdated findings
   codex-review all <pr>        Every finding including outdated/resolved ones
   codex-review json <pr>       Machine-readable findings (for agents/scripts)
   codex-review request <pr>    Post "@codex review" to trigger a re-review
@@ -30,13 +32,16 @@ USAGE
 OPTIONS
   -R, --repo OWNER/REPO   Target repo (default: repo of the current directory)
 
+ENVIRONMENT
+  CODEX_REVIEW_CONTEXT    Lines of code context in `detail` (default 12)
+
 EXIT CODES (status / findings)
   0  reviewed, no open findings          2  open findings exist
   3  not reviewed yet                    4  reviewed, but findings are stale-only
 
 EXAMPLES
   codex-review status 123
-  codex-review findings 123
+  codex-review detail 123
   codex-review request 123 && codex-review wait 123
 EOF
 }
@@ -84,7 +89,10 @@ review_shas() {
 # All inline review comments authored by the Codex bot, enriched:
 #   severity     P1|P2|P3|—   (from the badge image alt text)
 #   title        the bolded finding headline
-#   reviewed_sha the commit its parent review inspected
+#   rationale    the prose, minus the headline and the "Useful?" footer
+#   fix          the prescriptive clause Codex closes with (heuristic)
+#   diff_hunk    the code the finding is anchored to
+#   reviewed_sha the commit the finding was actually written against
 #   stale        true when that commit is NOT the PR's newest
 #   anchored     false when GitHub could no longer place it (line == null)
 fetch_findings() {
@@ -93,30 +101,62 @@ fetch_findings() {
   gh api "repos/$repo/pulls/$pr/comments" --paginate \
     --jq "[ .[] | select(.user.login | startswith(\"$BOT\")) ]" \
   | jq --argjson shas "$shamap" --arg head "$head_sha" --arg headdate "$head_date" '
+      def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
+      # Codex states what to do in its FINAL SENTENCE, and when that sentence also
+      # diagnoses the cause, the prescription follows a semicolon inside it. Take
+      # the sentence first, then the clause — the reverse order swallows the whole
+      # rationale whenever a semicolon appears early. A heuristic either way; the
+      # full rationale is printed alongside, so a bad guess costs nothing.
+      def prescription:
+        ([ splits("(?<=\\.)\\s+") ] | map(trim) | map(select(length > 0)) | last // .)
+        | (if   test("; ")    then (split("; ")    | last)
+           elif test(", so ") then (split(", so ") | last)
+           else . end)
+        | trim;
+
       [ .[]
         | {
-            id, path,
-            line: (.line // .original_line),
-            anchored: (.line != null),
+            id, path, diff_hunk,
+            line:       (.line // .original_line),
+            start_line: (.start_line // .original_start_line),
+            anchored:   (.line != null),
             created_at,
             url: .html_url,
             review_id: (.pull_request_review_id | tostring),
+            # original_commit_id is the commit the review actually inspected, and
+            # it never moves. .commit_id DOES move: GitHub drags it forward when
+            # it re-anchors the comment, making an old finding look current.
+            reviewed_sha: (.original_commit_id // ""),
             severity: ((.body | capture("!\\[(?<sev>P[0-9]) Badge\\]") | .sev) // "—"),
             title: (
               ((.body
                 | gsub("<[^>]*>"; "")
                 | gsub("!\\[[^]]*\\]\\([^)]*\\)"; "")
                 | capture("\\*\\*(?<t>[^*]+)\\*\\*") | .t) // "(untitled)")
-              | sub("^\\s+"; "") | sub("\\s+$"; "")
+              | trim
+            ),
+            rationale: (
+              .body
+              | sub("^\\s*\\*\\*[\\s\\S]*?\\*\\*"; "")        # drop the headline
+              | sub("\\s*Useful\\?[\\s\\S]*$"; "")            # drop the footer
+              | trim
             ),
             body: .body
           }
-        | . + { reviewed_sha: ($shas[.review_id] // "") }
+        # Fall back to the review body hash only if the API field is missing.
+        | . + { reviewed_sha: (if .reviewed_sha != "" then .reviewed_sha
+                               else ($shas[.review_id] // "") end) }
+        # When a finding cites a repo rule, Codex appends a "<file> reference: [link]"
+        # footer. Keep it in the rationale as provenance, but drop it before hunting
+        # for the prescription — otherwise the citation IS the last "sentence".
+        | . + { fix: (.rationale
+                      | sub("\\n\\s*[^\\n]*\\breference:[\\s\\S]*$"; "")
+                      | trim | prescription) }
+        | . + { fix: (if .fix == .rationale or (.fix | length) < 12 then "" else .fix end) }
         | . + {
-            # Prefer an exact commit match; fall back to dates only when the
-            # review body carried no hash. Bind reviewed_sha BEFORE piping into
-            # $head — a pipe rebinds `.` to the string and .reviewed_sha would
-            # then be an index into it.
+            # Prefer an exact commit match; fall back to dates only when nothing
+            # named a commit. Bind BEFORE piping into $head — a pipe rebinds `.`
+            # to the string, and .reviewed_sha would index into it.
             stale: (
               . as $c
               | if $c.reviewed_sha != "" and $head != "" then
@@ -195,19 +235,78 @@ print_findings() {
   fi
 
   printf '%s' "$json" | jq -r '
-    .[]
+    sort_by([.path, (.line // 0)])
+    | .[]
     | . + {
+        loc: (if (.start_line != null and .start_line != .line)
+              then "\(.start_line)-\(.line)" else "\(.line)" end),
         staleNote: (
           if .stale | not then ""
-          elif .reviewed_sha != "" then "  (STALE — reviewed \(.reviewed_sha))"
+          elif .reviewed_sha != "" then "  (STALE — reviewed \(.reviewed_sha[0:10]))"
           else "  (STALE — predates newest commit)"
           end
         ),
         anchorNote: (if .anchored then "" else "  (OUTDATED — code removed)" end)
       }
-    | "[\(.severity)] \(.path):\(.line)\(.staleNote)\(.anchorNote)\n" +
+    | "[\(.severity)] \(.path):\(.loc)\(.staleNote)\(.anchorNote)\n" +
       "      \(.title)\n" +
       "      \(.url)\n"'
+}
+
+# Everything you need to act on a finding, without opening the browser: the
+# reasoning, what Codex wants changed, and the code it is pointing at. Grouped by
+# file and ordered by line, so each file is opened once.
+cmd_detail() {
+  local repo pr head head_sha all json count ctx
+  repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"
+  ctx="${CODEX_REVIEW_CONTEXT:-12}"
+  head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
+  json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
+
+  if [ "$all" = "open" ]; then
+    json="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)]')"
+  fi
+
+  count="$(printf '%s' "$json" | jq 'length')"
+  if [ "$count" -eq 0 ]; then
+    if [ "$all" = "open" ]; then echo "No open Codex findings."; else echo "No Codex findings at all."; fi
+    return
+  fi
+
+  printf '%s' "$json" | jq -r --argjson ctx "$ctx" '
+    # Greedy word wrap. jq has no formatter, so build lines by folding words.
+    def wrap($w; $ind):
+      [ splits("\\s+") ] | map(select(length > 0))
+      | reduce .[] as $x ([];
+          if length == 0 then [$x]
+          elif ((.[-1] | length) + 1 + ($x | length)) <= $w then (.[0:-1] + [.[-1] + " " + $x])
+          else . + [$x] end)
+      | map($ind + .) | join("\n");
+    def wrapblock($w; $ind):
+      [ splits("\n\n+") ] | map(select(length > 0) | wrap($w; $ind)) | join("\n\n");
+
+    sort_by([.path, (.line // 0)])
+    | .[]
+    | (if (.start_line != null and .start_line != .line)
+       then "\(.start_line)-\(.line)" else "\(.line)" end) as $loc
+    | (if .stale | not then ""
+       elif .reviewed_sha != "" then "   ⚠ STALE — written against \(.reviewed_sha[0:10])"
+       else "   ⚠ STALE — predates the newest commit" end) as $stale
+    | (if .anchored then "" else "   ⚠ OUTDATED — GitHub could not re-anchor it" end) as $anchor
+    # GitHub ends the hunk AT the commented line, so the tail is the relevant
+    # context and its final line is the finding itself — marked with »».
+    | (.diff_hunk | split("\n")) as $h
+    | ($h | length) as $n
+    | ((if $n > $ctx then ["        …"] + ($h[$n-$ctx:] | map("        " + .))
+        else ($h | map("        " + .)) end)
+       | .[0:-1] + [ (.[-1] | sub("^        "; "     »» ")) ] | join("\n")) as $code
+    | "────────────────────────────────────────────────────────────────────────\n"
+      + "[\(.severity)]  \(.path):\($loc)\($stale)\($anchor)\n"
+      + "       \(.title)\n\n"
+      + "  WHY  \(.rationale | wrapblock(66; "       ") | ltrimstr("       "))\n"
+      + (if .fix != "" then "\n  FIX  \(.fix | wrap(66; "       ") | ltrimstr("       "))\n" else "" end)
+      + "\n  CODE\n\($code)\n"
+      + "\n  LINK \(.url)\n"'
 }
 
 cmd_status() {
@@ -325,6 +424,8 @@ cmd_wait() {
 case "$CMD" in
   status)   need_pr "${1:-}"; cmd_status "$1" ;;
   findings) need_pr "${1:-}"; print_findings "$1" open ;;
+  detail)     need_pr "${1:-}"; cmd_detail "$1" open ;;
+  detail-all) need_pr "${1:-}"; cmd_detail "$1" all ;;
   all)      need_pr "${1:-}"; print_findings "$1" all ;;
   json)     need_pr "${1:-}"; cmd_json "$1" ;;
   request)  need_pr "${1:-}"; cmd_request "$1" ;;

@@ -32,26 +32,33 @@ composing `gh` calls by hand.
    commit was cleared. A `+1` reaction also appears but is untimestamped, so it can
    never vouch for a specific commit.
 
-4. **Distinguish live findings from re-anchored ones.** GitHub moves old comments onto
-   new line numbers, so resolved findings look current. Do not settle this with
-   timestamps — **every** Codex output carries `Reviewed commit: <sha>`, including the
-   findings review body. Join each inline comment to its review through
-   `pull_request_review_id`, read that review's SHA, and treat the finding as live only
-   when:
-   - that SHA is the PR's newest commit, and
+4. **Distinguish live findings from re-anchored ones — and do not trust `commit_id`.**
+   GitHub moves old comments onto new line numbers, so resolved findings look current.
+   Worse, it drags `commit_id` forward to the newest commit as it re-anchors, so that
+   field will tell you a stale finding is about HEAD.
+
+   Read **`original_commit_id`** instead. It never moves, and it matches the
+   `Reviewed commit: <sha>` hash that every Codex output carries (the findings review
+   body, not only clean verdicts). Treat a finding as live only when:
+   - `original_commit_id` is the PR's newest commit, and
    - `line != null` (otherwise the code it referenced is gone).
 
-   Fall back to `created_at` only when an output carries no hash.
+   Fall back to `created_at` only when nothing names a commit.
 
-5. **Reproduce a finding before fixing it.** It is a hypothesis about the code, not a
+5. **Read the whole finding before fixing.** Each comment body carries the rationale
+   and, in its final sentence, the change Codex prescribes. `diff_hunk` carries the
+   code it is anchored to, ending **at** the commented line. `start_line`..`line` is a
+   range, not a single line.
+
+6. **Reproduce a finding before fixing it.** It is a hypothesis about the code, not a
    verdict. If it does not reproduce, report that with evidence instead of applying a
    speculative fix — a wrong fix can bury the real cause. A well-argued rebuttal is a
    legitimate outcome.
 
-6. **Re-request a review after pushing fixes.** Findings do not clear themselves and a
+7. **Re-request a review after pushing fixes.** Findings do not clear themselves and a
    push does not notify Codex. Post `@codex review` again, then re-check.
 
-7. **Report severity, location, and reproduction status** to the human. Do not claim a
+8. **Report severity, location, and reproduction status** to the human. Do not claim a
    PR passed review based on the absence of findings alone.
 
 ## Loop
@@ -72,4 +79,5 @@ gh api repos/O/R/pulls/N/comments  -q '[.[] | select(.user.login|startswith("cha
 gh api repos/O/R/pulls/N/reviews   -q 'length'
 gh api repos/O/R/issues/N/reactions -q '[.[] | "\(.user.login):\(.content)"]'
 gh api repos/O/R/pulls/N/commits   -q 'map(.commit.committer.date) | max'
+gh api repos/O/R/pulls/N/comments  -q '.[] | "\(.commit_id[0:10]) vs \(.original_commit_id[0:10])"'
 ```
