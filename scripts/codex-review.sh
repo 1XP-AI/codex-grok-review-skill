@@ -391,6 +391,12 @@ cmd_wait() {
   head="$(head_commit_date "$repo" "$pr")"
   deadline="${CODEX_REVIEW_TIMEOUT:-1800}"
   interval="${CODEX_REVIEW_INTERVAL:-60}"
+  # A review pass is not always one post — Codex has been observed splitting
+  # one pass across posts seconds apart. Returning on the first post reports a
+  # subset, and a caller whose merge rule is "no P1" can be shown "P1: 0" while
+  # a P1 is still in flight. Let the stream go quiet before reporting.
+  settle_secs="${CODEX_REVIEW_SETTLE_SECONDS:-45}"
+  settle_max="${CODEX_REVIEW_SETTLE_MAX_TRIES:-4}"
   elapsed=0
   local head_sha clean_sha
   head_sha="$(head_commit_sha "$repo" "$pr")"
@@ -407,6 +413,17 @@ cmd_wait() {
     latest="$(latest_review_date "$repo" "$pr")"
     if [ -n "$latest" ] && [ "$latest" \> "$head" ]; then
       echo "Review landed at $latest."
+      # Settle: keep looking until the newest review timestamp stops moving, so
+      # a pass split across several posts is reported whole.
+      settle_prev=""
+      settle_tries=0
+      while [ "$settle_tries" -lt "$settle_max" ] && [ "$latest" != "$settle_prev" ]; do
+        settle_prev="$latest"
+        sleep "$settle_secs"
+        latest="$(latest_review_date "$repo" "$pr")"
+        settle_tries=$((settle_tries + 1))
+      done
+      [ "$latest" != "$settle_prev" ] && echo "(more arrived — settled at $latest)"
       cmd_status "$pr" || true
       return 0
     fi
