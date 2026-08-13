@@ -261,6 +261,18 @@ reviewed_head() {
   esac
 }
 
+# How many Codex reviews state NO commit at all.
+#
+# The count the fallback watches. Counting every review instead let a review that
+# names a DIFFERENT commit satisfy it: Codex starts on A, B is pushed, waiting on
+# B rejects A by hash and then accepts the same review as "something new arrived".
+# A review that names a commit is answered by hash or not at all.
+hashless_review_count() {
+  local shas
+  shas="$(review_shas "$1" "$2")" || return 1
+  printf '%s' "$shas" | jq -r '[ to_entries[] | select((.value | length) == 0) ] | length'
+}
+
 # Full SHA of the PR's newest commit, for matching against `Reviewed commit`.
 #
 # From the pull-request object, NOT from the commit list. "List commits on a pull
@@ -490,7 +502,8 @@ cmd_wait() {
   # requests are in flight would otherwise be indistinguishable from one that was
   # already there, and this command would wait out its whole timeout for it.
   local reviews_at_entry reviews_now
-  reviews_at_entry="$(review_count "$repo" "$pr")"
+  reviews_at_entry="$(hashless_review_count "$repo" "$pr")" \
+    || die "could not read the reviews of PR #$pr in $repo."
   head="$(head_commit_date "$repo" "$pr")"
   deadline="${CODEX_REVIEW_TIMEOUT:-1800}"
   interval="${CODEX_REVIEW_INTERVAL:-60}"
@@ -514,7 +527,11 @@ cmd_wait() {
       return 0
     fi
     # A review that names this commit — exact, whatever the clocks say.
-    reviewed_n="$(reviewed_head "$repo" "$pr" "$head_sha" || echo 0)"
+    # A lookup that FAILED is not a lookup that found nothing. Swallowing it here
+    # made `wait` spin to its 1800s timeout printing the same error each round,
+    # when the honest answer was available on the first try.
+    reviewed_n="$(reviewed_head "$repo" "$pr" "$head_sha")" \
+      || die "could not read the reviews of PR #$pr in $repo."
     if [ -n "$head_sha" ] && [ "${reviewed_n:-0}" -gt 0 ]; then
       latest="$(latest_review_date "$repo" "$pr")"
       echo "Review landed at ${latest:-now}."
@@ -526,7 +543,8 @@ cmd_wait() {
     # one-second resolution, so a review arriving in the same second as the
     # watermark compared equal and was ignored until the timeout — and any
     # timestamp watermark has some version of that edge. A count does not.
-    reviews_now="$(review_count "$repo" "$pr")"
+    reviews_now="$(hashless_review_count "$repo" "$pr")" \
+      || die "could not read the reviews of PR #$pr in $repo."
     if [ "${reviews_now:-0}" -gt "${reviews_at_entry:-0}" ]; then
       latest="$(latest_review_date "$repo" "$pr")"
       echo "Review landed at ${latest:-now}."
