@@ -161,39 +161,48 @@ fetch_issue_findings() {
   api_all "repos/$repo/issues/$3/comments" \
   | jq --arg head "$head_sha" --arg bot "$BOT" '
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
+      # The same prescription heuristic the review-comment branch uses.
+      def prescription:
+        ([ splits("(?<=\\.)\\s+") ] | map(trim) | map(select(length > 0)) | last // .)
+        | (if test("; ") then (split("; ") | last) else . end)
+        | trim;
       [ .[]
         | select(.user.login | startswith($bot))
         | select(.body | test("!\\[P[0-9] Badge\\]"))
         | . as $c
-        | ($c.body | capture("blob/(?<sha>[0-9a-f]{7,40})/(?<path>[^#\\s]+)#L(?<line>[0-9]+)")) as $loc
+        # Ranged permalinks exist (#L12-L14). Both ends are kept: reporting only
+        # the first turns a reviewed range into a single line.
+        | ($c.body | capture("blob/(?<sha>[0-9a-f]{7,40})/(?<path>[^#\\s]+)#L(?<a>[0-9]+)(-L(?<b>[0-9]+))?")) as $loc
+        # The badge headline appears both wrapped in <sub> and bare. Requiring
+        # the wrappers produced "(untitled)" and left the whole heading sitting
+        # in the rationale.
+        | (($c.body | capture("!\\[P[0-9] Badge\\]\\([^)]*\\)(</sub>)*\\s*(?<t>[^*\\n]+)\\*\\*") | .t | trim) // "(untitled)") as $title
+        | ($c.body
+           | sub("^[\\s\\S]*?!\\[P[0-9] Badge\\]\\([^)]*\\)(</sub>)*[^\\n]*\\n"; "")
+           | sub("\\s*<details>[\\s\\S]*$"; "")
+           | trim) as $rationale
         | {
             id: $c.id,
             review_id: ($c.id | tostring),
             created_at: $c.created_at,
             path: $loc.path,
-            line: ($loc.line | tonumber),
-            start_line: null,
+            line: (($loc.b // $loc.a) | tonumber),
+            start_line: (if $loc.b == null then null else ($loc.a | tonumber) end),
             anchored: true,
             reviewed_sha: $loc.sha,
             severity: (($c.body | capture("!\\[(?<sev>P[0-9]) Badge\\]") | .sev) // "—"),
-            title: (($c.body
-                     | capture("Badge\\]\\([^)]*\\)</sub></sub>\\s*(?<t>[^*\\n]+)\\*\\*")
-                     | .t | trim) // "(untitled)"),
-            # Everything after the title line, minus the collapsible footer the
-            # bot appends to every one of these.
-            rationale: ($c.body
-                        | sub("^[\\s\\S]*?\\*\\*<sub>[\\s\\S]*?\\*\\*\\s*"; "")
-                        | sub("\\s*<details>[\\s\\S]*$"; "")
-                        | trim),
-            # No diff hunk in this form — the permalink is the location.
+            title: $title,
+            rationale: $rationale,
             diff_hunk: "",
             body: $c.body,
-            html_url: $c.html_url
+            url: $c.html_url
           }
-        | . + { fix: "" }
-        # Bound BEFORE the pipe: inside `$head | startswith(...)` the input is
-        # $head, a string, and `.reviewed_sha` would index into it. Same trap as
-        # the review-comment branch below documents.
+        | . + { fix: (.rationale
+                      | sub("\\n\\s*[^\\n]*\\breference:[\\s\\S]*$"; "")
+                      | trim | prescription) }
+        | . + { fix: (if .fix == .rationale or (.fix | length) < 12 then "" else .fix end) }
+        # Bound BEFORE the pipe: inside the startswith pipeline the input is
+        # $head, a string, and .reviewed_sha would index into it.
         | . + { stale: (. as $f
                         | if $f.reviewed_sha != "" and $head != ""
                           then ($head | startswith($f.reviewed_sha)) | not
@@ -338,6 +347,17 @@ hashless_review_count() {
   printf '%s' "$shas" | jq -r '[ to_entries[] | select((.value | length) == 0) ] | length'
 }
 
+# How many issue-comment findings name THIS head commit.
+#
+# Their permalink carries the commit, so this is exact — and it is the only
+# signal that a review happened when Codex posted the result as a comment
+# instead of a review object.
+issue_findings_for_head() {
+  local head="$3"
+  fetch_issue_findings "$1" "$3" "$2" \
+    | jq -r --arg head "$head" '[ .[] | select(.stale | not) ] | length'
+}
+
 # Full SHA of the PR's newest commit, for matching against `Reviewed commit`.
 #
 # From the pull-request object, NOT from the commit list. "List commits on a pull
@@ -374,19 +394,79 @@ cmd_json() {
   fetch_findings "$repo" "$pr" "$head" "$head_sha"
 }
 
+# THE verdict. One decision site, deliberately.
+#
+# `status` and `findings` both publish exit codes, and the help text promises they are
+# the same codes. They were not: `findings` returned 0 with open findings on screen, so
+# a merge gate written as `codex-review.sh findings N && merge` merged straight through
+# them. Two copies of a rule this fiddly will drift again, so there is one copy, and
+# `status` renders its messages from the key rather than re-deciding.
+#
+# Echoes a key; returns the exit code that goes with it.
+verdict_key() {
+  local open="$1" total="$2" reviews="$3" thumbs="$4" clean_line="$5" \
+        clean_matches_head="$6" clean_sha="$7" issue_open="$8"
+
+  # A clean verdict naming the newest commit is the strongest possible signal.
+  if [ "$open" -eq 0 ] && [ "$clean_matches_head" -eq 1 ]; then
+    echo clean-head; return 0
+  fi
+
+  if [ "$reviews" -eq 0 ] && [ "$thumbs" -eq 0 ] && [ -z "$clean_line" ] \
+     && [ "${issue_open:-0}" -eq 0 ]; then
+    echo not-reviewed; return 3
+  fi
+
+  if [ "$open" -eq 0 ]; then
+    if [ -n "$clean_sha" ] && [ "$clean_matches_head" -eq 0 ]; then
+      echo stale-clean; return 3
+    fi
+    if [ "$total" -gt 0 ]; then echo all-stale; return 4; fi
+    echo clean; return 0
+  fi
+
+  echo open; return 2
+}
+
+# Every input `verdict_key` needs, gathered from the API. Kept next to it so a new
+# input cannot be added to one and forgotten in the other.
+verdict_for() {
+  local repo="$1" pr="$2" head_sha="$3" json="$4"
+  local open total reviews thumbs clean clean_line clean_sha matches
+
+  open="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)] | length')"
+  total="$(printf '%s' "$json" | jq 'length')"
+  reviews="$(review_count "$repo" "$pr")"
+  thumbs="$(has_thumbsup "$repo" "$pr")"
+  clean="$(clean_verdicts "$repo" "$pr")"
+  clean_line="$(printf '%s' "$clean" | tail -n 1)"
+  clean_sha="$(printf '%s' "$clean_line" | cut -f2)"
+  matches=0
+  if [ -n "$clean_sha" ] && [ -n "$head_sha" ]; then
+    case "$head_sha" in "$clean_sha"*) matches=1 ;; esac
+  fi
+
+  verdict_key "$open" "$total" "$reviews" "$thumbs" "$clean_line" "$matches" \
+    "$clean_sha" "$(issue_findings_for_head "$repo" "$pr" "$head_sha" 2>/dev/null || echo 0)"
+}
+
 print_findings() {
-  local repo pr head head_sha all json count
+  local repo pr head head_sha all json count code
   repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
 
+  # Decided on the UNFILTERED list, before `open` mode throws the stale ones away —
+  # "all stale" and "none at all" are different verdicts and both look empty after.
+  code=0
   if [ "$all" = "open" ]; then
+    verdict_for "$repo" "$pr" "$head_sha" "$json" >/dev/null || code=$?
     json="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)]')"
   fi
 
   count="$(printf '%s' "$json" | jq 'length')"
   if [ "$count" -eq 0 ]; then
     if [ "$all" = "open" ]; then echo "No open Codex findings."; else echo "No Codex findings at all."; fi
-    return
+    return "$code"
   fi
 
   printf '%s' "$json" | jq -r '
@@ -406,6 +486,8 @@ print_findings() {
     | "[\(.severity)] \(.path):\(.loc)\(.staleNote)\(.anchorNote)\n" +
       "      \(.title)\n" +
       "      \(.url)\n"'
+
+  return "$code"
 }
 
 # Everything you need to act on a finding, without opening the browser: the
@@ -449,11 +531,17 @@ cmd_detail() {
     | (if .anchored then "" else "   ⚠ OUTDATED — GitHub could not re-anchor it" end) as $anchor
     # GitHub ends the hunk AT the commented line, so the tail is the relevant
     # context and its final line is the finding itself — marked with »».
-    | (.diff_hunk | split("\n")) as $h
-    | ($h | length) as $n
-    | ((if $n > $ctx then ["        …"] + ($h[$n-$ctx:] | map("        " + .))
-        else ($h | map("        " + .)) end)
-       | .[0:-1] + [ (.[-1] | sub("^        "; "     »» ")) ] | join("\n")) as $code
+    # An issue-comment finding carries no hunk — its permalink is the anchor.
+    # Splitting "" yields [""], and the renderer then produced a code block
+    # holding one blank marker line, which reads as if the finding pointed at
+    # nothing at all.
+    | (if (.diff_hunk | length) == 0 then null else (.diff_hunk | split("\n")) end) as $h
+    | (if $h == null then "        (no diff hunk — the link below is the anchor)"
+       else (($h | length) as $n
+         | ((if $n > $ctx then ["        …"] + ($h[$n-$ctx:] | map("        " + .))
+             else ($h | map("        " + .)) end)
+            | .[0:-1] + [ (.[-1] | sub("^        "; "     »» ")) ] | join("\n")))
+       end) as $code
     | "────────────────────────────────────────────────────────────────────────\n"
       + "[\(.severity)]  \(.path):\($loc)\($stale)\($anchor)\n"
       + "       \(.title)\n\n"
@@ -464,7 +552,7 @@ cmd_detail() {
 }
 
 cmd_status() {
-  local repo pr head head_sha json open p1 reviews thumbs latest
+  local repo pr head head_sha json open p1 reviews thumbs latest issue_open
   local clean clean_line clean_sha clean_at clean_matches_head
   repo="$(resolve_repo)"; pr="$1"
   head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
@@ -472,6 +560,10 @@ cmd_status() {
   open="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)] | length')"
   p1="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true and .severity == "P1")] | length')"
   reviews="$(review_count "$repo" "$pr")"
+  # An issue-comment finding is evidence a review happened even when no review
+  # object exists — otherwise `status` reports "not reviewed yet" while a P1 it
+  # just listed sits on the PR.
+  issue_open="$(issue_findings_for_head "$repo" "$pr" "$head_sha" 2>/dev/null || echo 0)"
   thumbs="$(has_thumbsup "$repo" "$pr")"
   latest="$(latest_review_date "$repo" "$pr")"
 
@@ -497,37 +589,34 @@ cmd_status() {
   fi
   echo "  open findings : $open  (P1: $p1)"
 
-  # A clean verdict naming the newest commit is the strongest possible signal.
-  if [ "$open" -eq 0 ] && [ "$clean_matches_head" -eq 1 ]; then
-    echo "  VERDICT       : REVIEWED, CLEAN — verdict names the newest commit."
-    return 0
-  fi
+  # The decision itself lives in verdict_key. Everything below renders it.
+  local key code total
+  code=0
+  key="$(verdict_key "$open" "$(printf '%s' "$json" | jq 'length')" "$reviews" "$thumbs" \
+        "$clean_line" "$clean_matches_head" "$clean_sha" "${issue_open:-0}")" || code=$?
+  total="$(printf '%s' "$json" | jq 'length')"
 
-  if [ "$reviews" -eq 0 ] && [ "$thumbs" -eq 0 ] && [ -z "$clean_line" ]; then
-    echo "  VERDICT       : NOT REVIEWED — no review, no 👍, no clean verdict."
-    echo "                  Trigger one:  codex-review request $pr"
-    return 3
-  fi
-
-  if [ "$open" -eq 0 ]; then
-    local total; total="$(printf '%s' "$json" | jq 'length')"
-    if [ -n "$clean_sha" ] && [ "$clean_matches_head" -eq 0 ]; then
+  case "$key" in
+    clean-head)
+      echo "  VERDICT       : REVIEWED, CLEAN — verdict names the newest commit." ;;
+    not-reviewed)
+      echo "  VERDICT       : NOT REVIEWED — no review, no 👍, no clean verdict."
+      echo "                  Trigger one:  codex-review request $pr" ;;
+    stale-clean)
       echo "  VERDICT       : STALE CLEAN VERDICT — it names ${clean_sha}, not the newest commit."
-      echo "                  Newer commits are unreviewed:  codex-review request $pr"
-      return 3
-    fi
-    if [ "$total" -gt 0 ]; then
+      echo "                  Newer commits are unreviewed:  codex-review request $pr" ;;
+    all-stale)
       echo "  VERDICT       : REVIEWED — $total finding(s), all stale/outdated."
-      echo "                  Confirm they are addressed, then merge."
-      return 4
-    fi
-    echo "  VERDICT       : REVIEWED, CLEAN."
-    return 0
-  fi
-
-  echo "  VERDICT       : $open OPEN FINDING(S) — address before merging."
-  [ "$p1" -gt 0 ] && echo "                  ⚠ $p1 of them are P1."
-  return 2
+      echo "                  Confirm they are addressed, then merge." ;;
+    clean)
+      echo "  VERDICT       : REVIEWED, CLEAN." ;;
+    open)
+      echo "  VERDICT       : $open OPEN FINDING(S) — address before merging."
+      [ "$p1" -gt 0 ] && echo "                  ⚠ $p1 of them are P1." ;;
+    *)
+      die "internal: unknown verdict key '$key'" ;;
+  esac
+  return "$code"
 }
 
 cmd_request() {
@@ -577,7 +666,7 @@ cmd_wait() {
   settle_secs="${CODEX_REVIEW_SETTLE_SECONDS:-45}"
   settle_max="${CODEX_REVIEW_SETTLE_MAX_TRIES:-4}"
   elapsed=0
-  local head_sha clean_sha reviewed_n
+  local head_sha clean_sha reviewed_n issue_n
   head_sha="$(head_commit_sha "$repo" "$pr")"
   echo "Waiting for a Codex verdict on ${head_sha:0:10} (timeout ${deadline}s)..."
   while [ "$elapsed" -lt "$deadline" ]; do
@@ -595,7 +684,12 @@ cmd_wait() {
     # when the honest answer was available on the first try.
     reviewed_n="$(reviewed_head "$repo" "$pr" "$head_sha")" \
       || die "could not read the reviews of PR #$pr in $repo."
-    if [ -n "$head_sha" ] && [ "${reviewed_n:-0}" -gt 0 ]; then
+    # A finding can arrive as an ISSUE comment with no review object behind it.
+    # Waiting only on reviews meant the command sat out its whole timeout while
+    # the verdict — a P1, in the case that surfaced this — was already posted.
+    issue_n="$(issue_findings_for_head "$repo" "$pr" "$head_sha")" \
+      || die "could not read the comments of PR #$pr in $repo."
+    if [ -n "$head_sha" ] && { [ "${reviewed_n:-0}" -gt 0 ] || [ "${issue_n:-0}" -gt 0 ]; }; then
       latest="$(latest_review_date "$repo" "$pr")"
       echo "Review landed at ${latest:-now}."
       settle_and_report "$repo" "$pr" "$latest"

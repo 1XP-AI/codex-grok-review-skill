@@ -30,6 +30,19 @@ The reliable source is:
 gh api repos/OWNER/REPO/pulls/123/comments
 ```
 
+**And that endpoint is not the whole story either.** Codex also files findings as plain
+issue comments — same badge, same severity, but located by a blob permalink in the body
+instead of by `path`/`line`:
+
+```bash
+gh api repos/OWNER/REPO/issues/123/comments \
+  -q '[.[] | select(.body | test("!\\[P[0-9] Badge\\]"))] | length'
+# 1   ← a P1 that pulls/123/comments never mentions
+```
+
+That is not hypothetical: it is how this wrapper came to report `CLEAN` on a PR with an
+open P1. Both endpoints have to be read and merged, which is what the wrapper does.
+
 ### 2. Severity is a markdown image badge — easy to strip by accident
 
 Each finding opens with:
