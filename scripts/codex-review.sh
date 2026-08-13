@@ -485,12 +485,12 @@ settle_and_report() {
 
 cmd_wait() {
   local repo pr head deadline interval elapsed reviews thumbs latest
-  # BEFORE any request. A hashless review landing while the head lookups are in
-  # flight carries a timestamp older than a watermark taken after them, and the
-  # strict comparison then ignores it until this command times out.
-  local started
-  started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   repo="$(resolve_repo)"; pr="$1"
+  # Snapshot BEFORE the head lookups. A hashless review landing while those
+  # requests are in flight would otherwise be indistinguishable from one that was
+  # already there, and this command would wait out its whole timeout for it.
+  local reviews_at_entry reviews_now
+  reviews_at_entry="$(review_count "$repo" "$pr")"
   head="$(head_commit_date "$repo" "$pr")"
   deadline="${CODEX_REVIEW_TIMEOUT:-1800}"
   interval="${CODEX_REVIEW_INTERVAL:-60}"
@@ -503,7 +503,7 @@ cmd_wait() {
   elapsed=0
   local head_sha clean_sha reviewed_n
   head_sha="$(head_commit_sha "$repo" "$pr")"
-  echo "Waiting for a Codex verdict on ${head_sha:0:10} (since $started, timeout ${deadline}s)..."
+  echo "Waiting for a Codex verdict on ${head_sha:0:10} (timeout ${deadline}s)..."
   while [ "$elapsed" -lt "$deadline" ]; do
     # Strongest signal: a clean verdict naming this exact commit.
     clean_sha="$(clean_verdicts "$repo" "$pr" | tail -n 1 | cut -f2)"
@@ -521,12 +521,15 @@ cmd_wait() {
       settle_and_report "$repo" "$pr" "$latest"
       return $?
     fi
-    latest="$(latest_review_date "$repo" "$pr")"
-    # Fallback for a review that states no commit at all. The watermark is when
-    # THIS wait started, which cannot move backward; the head commit's own date
-    # can, and using it let an old review satisfy this test.
-    if [ -n "$latest" ] && [ "$latest" \> "$started" ]; then
-      echo "Review landed at $latest."
+    # Fallback for a review that states no commit at all: has one APPEARED since
+    # this command started? Counted, not timed. GitHub's submitted_at has
+    # one-second resolution, so a review arriving in the same second as the
+    # watermark compared equal and was ignored until the timeout — and any
+    # timestamp watermark has some version of that edge. A count does not.
+    reviews_now="$(review_count "$repo" "$pr")"
+    if [ "${reviews_now:-0}" -gt "${reviews_at_entry:-0}" ]; then
+      latest="$(latest_review_date "$repo" "$pr")"
+      echo "Review landed at ${latest:-now}."
       settle_and_report "$repo" "$pr" "$latest"
       return $?
     fi
