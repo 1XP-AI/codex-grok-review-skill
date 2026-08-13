@@ -12,6 +12,41 @@ BOT="chatgpt-codex-connector"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# ── Fetch every page as ONE array, then filter ───────────────────────────────
+#
+# `gh api --paginate --jq EXPR` runs EXPR against each page SEPARATELY and prints
+# a result per page. So `[...] | length` answers "100\n91" on a PR with 191 review
+# comments, and the arithmetic downstream — `[ "$n" -gt 0 ]` — dies with
+# "integer expression expected", taking the VERDICT line with it. It only shows up
+# past 100 comments, which is to say on exactly the long-running PRs this loop
+# exists for.
+#
+# `--slurp` cannot be combined with `--jq`, so the merging and the filtering have
+# to be separate steps.
+#
+# Always emits a JSON array, so callers can pipe into jq without guarding: an
+# unreachable API becomes "nothing found", never a syntax error mid-pipeline.
+api_all() {
+  local out errfile err rc=0
+  errfile="$(mktemp)"
+  out="$(gh api "$1" --paginate --slurp 2>"$errfile")" || rc=$?
+  err="$(cat "$errfile" 2>/dev/null || true)"
+  rm -f "$errfile"
+  if [ "$rc" -ne 0 ]; then
+    # A gh too old for --slurp would otherwise look like "no findings" on every
+    # PR, which is the most expensive way to be wrong. Name it instead.
+    case "$err" in
+      *slurp*) die "this gh does not support 'api --slurp' (needs gh >= 2.44). Upgrade gh." ;;
+    esac
+    # Everything else — 404, auth, rate limit — propagates exactly as it did
+    # before this helper existed. Callers that mean to tolerate a failure say so
+    # themselves (`|| echo 0`); the rest should still stop.
+    printf '%s\n' "$err" >&2
+    return "$rc"
+  fi
+  printf '%s' "$out" | jq '[ .[][] ]'
+}
+
 command -v gh >/dev/null || die "gh CLI not found"
 command -v jq >/dev/null || die "jq not found"
 
@@ -70,16 +105,14 @@ need_pr() { [ -n "${1:-}" ] || die "missing <pr> (a pull request number)"; }
 
 # Newest commit timestamp on the PR. Findings older than this may be stale.
 head_commit_date() {
-  gh api "repos/$1/pulls/$2/commits" --paginate \
-    -q 'map(.commit.committer.date // .commit.author.date) | max // ""'
+  api_all "repos/$1/pulls/$2/commits" | jq -r 'map(.commit.committer.date // .commit.author.date) | max // ""'
 }
 
 # review id → the commit that review inspected. Every Codex output states it as
 #   **Reviewed commit:** `<sha10>`
 # which is far better than guessing from timestamps.
 review_shas() {
-  gh api "repos/$1/pulls/$2/reviews" --paginate \
-    -q "[ .[]
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "[ .[]
           | select(.user.login | startswith(\"$BOT\"))
           | { key: (.id | tostring),
               value: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
@@ -98,8 +131,7 @@ review_shas() {
 fetch_findings() {
   local repo="$1" pr="$2" head_date="$3" head_sha="$4" shamap
   shamap="$(review_shas "$repo" "$pr")"
-  gh api "repos/$repo/pulls/$pr/comments" --paginate \
-    --jq "[ .[] | select(.user.login | startswith(\"$BOT\")) ]" \
+  api_all "repos/$repo/pulls/$pr/comments" | jq -r "[ .[] | select(.user.login | startswith(\"$BOT\")) ]" \
   | jq --argjson shas "$shamap" --arg head "$head_sha" --arg headdate "$head_date" '
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
       # Codex states what to do in its FINAL SENTENCE, and when that sentence also
@@ -172,8 +204,7 @@ fetch_findings() {
 # Codex leaves NO review object when it has nothing to say — it reacts 👍 on the
 # PR instead. So "zero reviews" is ambiguous unless you also check reactions.
 has_thumbsup() {
-  gh api "repos/$1/issues/$2/reactions" --paginate \
-    -q "[.[] | select((.user.login | startswith(\"$BOT\")) and .content == \"+1\")] | length" \
+  api_all "repos/$1/issues/$2/reactions" | jq -r "[.[] | select((.user.login | startswith(\"$BOT\")) and .content == \"+1\")] | length" \
     2>/dev/null || echo 0
 }
 
@@ -186,8 +217,7 @@ has_thumbsup() {
 # on it. The `Reviewed commit` hash is the valuable part: unlike a 👍 reaction, it
 # proves WHICH commit was reviewed. Emits "<iso8601>\t<sha>" per clean verdict.
 clean_verdicts() {
-  gh api "repos/$1/issues/$2/comments" --paginate \
-    -q "[ .[]
+  api_all "repos/$1/issues/$2/comments" | jq -r "[ .[]
           | select(.user.login | startswith(\"$BOT\"))
           | select(.body | test(\"[Dd]idn't find any major issues\"))
           | { created_at, sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
@@ -196,17 +226,15 @@ clean_verdicts() {
 
 # Full SHA of the PR's newest commit, for matching against `Reviewed commit`.
 head_commit_sha() {
-  gh api "repos/$1/pulls/$2/commits" --paginate -q '.[-1].sha // ""' 2>/dev/null || true
+  api_all "repos/$1/pulls/$2/commits" | jq -r '.[-1].sha // ""' 2>/dev/null || true
 }
 
 review_count() {
-  gh api "repos/$1/pulls/$2/reviews" --paginate \
-    -q "[.[] | select(.user.login | startswith(\"$BOT\"))] | length" 2>/dev/null || echo 0
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "[.[] | select(.user.login | startswith(\"$BOT\"))] | length" 2>/dev/null || echo 0
 }
 
 latest_review_date() {
-  gh api "repos/$1/pulls/$2/reviews" --paginate \
-    -q "[.[] | select(.user.login | startswith(\"$BOT\")) | .submitted_at] | max // \"\"" 2>/dev/null
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "[.[] | select(.user.login | startswith(\"$BOT\")) | .submitted_at] | max // \"\"" 2>/dev/null
 }
 
 sev_rank() { case "$1" in P1) echo 1;; P2) echo 2;; P3) echo 3;; *) echo 9;; esac; }
