@@ -206,6 +206,11 @@ fetch_issue_findings() {
         | ($c.body
            | sub("^[\\s\\S]*?!\\[P[0-9] Badge\\]\\([^)]*\\)(</sub>)*[^\\n]*\\n"; "")
            | sub("\\s*<details>[\\s\\S]*$"; "")
+           # The same "Useful? React with..." footer the inline parser drops. Left
+           # in, it is the last sentence of the rationale — so `prescription` picks
+           # it and `detail` prints "React with thumbs" under FIX, which is the one
+           # line of that block a reader acts on.
+           | sub("\\s*Useful\\?[\\s\\S]*$"; "")
            | trim) as $rationale
         | {
             id: $c.id,
@@ -474,8 +479,14 @@ verdict_key() {
     echo clean-head; return 0
   fi
 
+  # `total`, not just `issue_open`. An issue-comment finding leaves no review
+  # object, so once it goes stale every other trace of that review is gone and
+  # this reported not-reviewed — sending the caller to request a review that
+  # already happened, and losing the all-stale verdict that says "check these
+  # were addressed". A finding on the PR is evidence a review produced it,
+  # whether or not it still points at the newest commit.
   if [ "$reviews" -eq 0 ] && [ "$thumbs" -eq 0 ] && [ -z "$clean_line" ] \
-     && [ "${issue_open:-0}" -eq 0 ]; then
+     && [ "${issue_open:-0}" -eq 0 ] && [ "$total" -eq 0 ]; then
     echo not-reviewed; return 3
   fi
 

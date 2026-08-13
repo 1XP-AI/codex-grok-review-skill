@@ -42,6 +42,11 @@ t 'open findings'                 '2 5 1 0 "" 0 "" 0'   open         2
 # this row read as not-reviewed while a P1 sat on the PR. It is now counted out of the
 # same snapshot as `open`, so a live one always shows up in `open` and `total` too.
 t 'issue finding, no review object' '1 1 0 0 "" 0 "" 1'   open         2
+# An issue-comment finding leaves no review object behind it, so when it goes stale
+# the finding IS the only evidence a review ever ran. Keyed on reviews/thumbs/clean
+# alone, this row said not-reviewed — telling the caller to request a review that had
+# already happened, and dropping the all-stale verdict that says "check these landed".
+t 'stale issue finding, no review' '0 1 0 0 "" 0 "" 0'   all-stale    4
 # The combination that cannot come from one snapshot. It could when `issue_open` was
 # its own fetch, and it fell straight through to clean/0 with a P1 on the PR.
 t 'live issue finding, empty list'  '0 0 0 0 "" 0 "" 1'   inconsistent 3
