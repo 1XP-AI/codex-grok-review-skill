@@ -186,7 +186,13 @@ Set `CODEX_REVIEW_CONTEXT` to change how many lines of code context are shown.
 
 ## Install
 
-Requires [`gh`](https://cli.github.com/) (authenticated) and [`jq`](https://jqlang.github.io/jq/).
+Requires [`gh`](https://cli.github.com/) **2.44 or newer** (authenticated) and
+[`jq`](https://jqlang.github.io/jq/). The version floor is `gh api --slurp`, which is how
+every page of a long PR's comments gets merged before being filtered — without it the
+counts come back one-per-page and the verdict is unreadable. An older `gh` is refused
+with a message rather than quietly reporting no findings.
+
+Check yours with `gh --version`.
 
 ```bash
 git clone https://github.com/1XP-AI/codex-review-skill.git
