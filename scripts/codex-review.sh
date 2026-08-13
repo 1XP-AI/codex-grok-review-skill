@@ -161,6 +161,32 @@ fetch_issue_findings() {
   api_all "repos/$repo/issues/$3/comments" \
   | jq --arg head "$head_sha" --arg bot "$BOT" '
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
+      def _hv: {"0":0,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,
+                "a":10,"b":11,"c":12,"d":13,"e":14,"f":15}[ascii_downcase];
+      # Percent-decode, UTF-8 aware.
+      #
+      # jq has no uridecode, and decoding each escape on its own is worse than not
+      # decoding: %ED%95%9C is three BYTES of one character, and implode reads them as
+      # three codepoints, so a Korean filename comes out as mojibake that matches nothing.
+      # So the escapes are turned into bytes and the bytes are folded back into
+      # codepoints the way UTF-8 defines. Literal characters in a URL are ASCII, where
+      # byte and codepoint coincide, so explode is the right source for them.
+      def uridecode:
+        [ scan("%[0-9A-Fa-f]{2}|[\\s\\S]") ]
+        | map(if startswith("%") and (length == 3)
+              then [ (.[1:2] | _hv) * 16 + (.[2:3] | _hv) ]
+              else explode end)
+        | add // []
+        | reduce .[] as $b ({ cp: 0, need: 0, out: [] };
+            if .need > 0 then
+              { cp: (.cp * 64 + ($b - 128)), need: (.need - 1), out: .out }
+              | if .need == 0 then { cp: 0, need: 0, out: (.out + [.cp]) } else . end
+            elif $b < 128    then { cp: 0, need: 0, out: (.out + [$b]) }
+            elif $b >= 240   then { cp: ($b - 240), need: 3, out: .out }
+            elif $b >= 224   then { cp: ($b - 224), need: 2, out: .out }
+            elif $b >= 192   then { cp: ($b - 192), need: 1, out: .out }
+            else { cp: 0, need: 0, out: (.out + [$b]) } end)
+        | .out | implode;
       # The same prescription heuristic the review-comment branch uses.
       def prescription:
         ([ splits("(?<=\\.)\\s+") ] | map(trim) | map(select(length > 0)) | last // .)
@@ -185,7 +211,7 @@ fetch_issue_findings() {
             id: $c.id,
             review_id: ($c.id | tostring),
             created_at: $c.created_at,
-            path: $loc.path,
+            path: ($loc.path | uridecode),
             line: (($loc.b // $loc.a) | tonumber),
             start_line: (if $loc.b == null then null else ($loc.a | tonumber) end),
             source: "issue",
@@ -285,9 +311,14 @@ fetch_findings() {
             )
           }
       ]' \
-  | jq --argjson extra "$extra" '
+  | jq --slurpfile extra <(printf '%s' "$extra") '
       # Two sources, one list. A finding is a finding whichever way it arrived.
-      . + $extra | sort_by(.created_at) | reverse'
+      #
+      # --slurpfile, not --argjson: argv values pass through execve, which caps a
+      # SINGLE argument at 128KB on Linux. Each finding carries its whole comment
+      # body, so a busy PR crosses that and the merge dies with E2BIG — on the
+      # PR that needs it most. A pipe has no such ceiling.
+      . + $extra[0] | sort_by(.created_at) | reverse'
 }
 
 # Codex leaves NO review object when it has nothing to say — it reacts 👍 on the
@@ -728,13 +759,18 @@ cmd_wait() {
     reviewed_n="$(reviewed_head "$repo" "$pr" "$head_sha")" \
       || die "could not read the reviews of PR #$pr in $repo."
     # A finding can arrive as an ISSUE comment with no review object behind it.
-    # Waiting only on reviews meant the command sat out its whole timeout while
-    # the verdict — a P1, in the case that surfaced this — was already posted.
-    issue_n="$(issue_findings_now "$repo" "$pr" "$head_sha")" \
-      || die "could not read the comments of PR #$pr in $repo."
+    # Only asked when the reviews have not already answered: a failing second
+    # endpoint must not throw away a review this loop has just recognised and send
+    # the caller back to waiting for something that already landed.
+    if [ -n "$head_sha" ] && [ "${reviewed_n:-0}" -eq 0 ]; then
+      issue_n="$(issue_findings_now "$repo" "$pr" "$head_sha")" \
+        || die "could not read the comments of PR #$pr in $repo."
+    else
+      issue_n=0
+    fi
     if [ -n "$head_sha" ] && { [ "${reviewed_n:-0}" -gt 0 ] || [ "${issue_n:-0}" -gt 0 ]; }; then
       latest="$(activity_stamp "$repo" "$pr")"
-      echo "Review landed at ${latest:-now}."
+      echo "Review landed."
       settle_and_report "$repo" "$pr" "$latest"
       return $?
     fi
