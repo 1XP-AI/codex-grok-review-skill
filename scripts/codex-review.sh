@@ -145,9 +145,67 @@ review_shas() {
 #   reviewed_sha the commit the finding was actually written against
 #   stale        true when that commit is NOT the PR's newest
 #   anchored     false when GitHub could no longer place it (line == null)
+# Findings Codex posts as ISSUE comments rather than review comments.
+#
+# Most arrive attached to a line of the diff. Some — observed right after a
+# failed review attempt, when the bot retries — arrive as a plain PR comment
+# instead: a blob permalink, the severity badge, the title, the rationale. This
+# reader looked only at review comments, so those counted as "no findings",
+# which is the one answer the tool must never get wrong. One such comment among
+# 218 on a single PR was a P1.
+#
+# The permalink carries MORE than the review-comment form: the commit, the path
+# and the line are all in the URL, so staleness here is exact rather than dated.
+fetch_issue_findings() {
+  local repo="$1" head_sha="$2"
+  api_all "repos/$repo/issues/$3/comments" \
+  | jq --arg head "$head_sha" --arg bot "$BOT" '
+      def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
+      [ .[]
+        | select(.user.login | startswith($bot))
+        | select(.body | test("!\\[P[0-9] Badge\\]"))
+        | . as $c
+        | ($c.body | capture("blob/(?<sha>[0-9a-f]{7,40})/(?<path>[^#\\s]+)#L(?<line>[0-9]+)")) as $loc
+        | {
+            id: $c.id,
+            review_id: ($c.id | tostring),
+            created_at: $c.created_at,
+            path: $loc.path,
+            line: ($loc.line | tonumber),
+            start_line: null,
+            anchored: true,
+            reviewed_sha: $loc.sha,
+            severity: (($c.body | capture("!\\[(?<sev>P[0-9]) Badge\\]") | .sev) // "—"),
+            title: (($c.body
+                     | capture("Badge\\]\\([^)]*\\)</sub></sub>\\s*(?<t>[^*\\n]+)\\*\\*")
+                     | .t | trim) // "(untitled)"),
+            # Everything after the title line, minus the collapsible footer the
+            # bot appends to every one of these.
+            rationale: ($c.body
+                        | sub("^[\\s\\S]*?\\*\\*<sub>[\\s\\S]*?\\*\\*\\s*"; "")
+                        | sub("\\s*<details>[\\s\\S]*$"; "")
+                        | trim),
+            # No diff hunk in this form — the permalink is the location.
+            diff_hunk: "",
+            body: $c.body,
+            html_url: $c.html_url
+          }
+        | . + { fix: "" }
+        # Bound BEFORE the pipe: inside `$head | startswith(...)` the input is
+        # $head, a string, and `.reviewed_sha` would index into it. Same trap as
+        # the review-comment branch below documents.
+        | . + { stale: (. as $f
+                        | if $f.reviewed_sha != "" and $head != ""
+                          then ($head | startswith($f.reviewed_sha)) | not
+                          else false end) }
+      ]'
+}
+
 fetch_findings() {
-  local repo="$1" pr="$2" head_date="$3" head_sha="$4" shamap
+  local repo="$1" pr="$2" head_date="$3" head_sha="$4" shamap extra
   shamap="$(review_shas "$repo" "$pr")"
+  # Findings that arrived as issue comments, in the same shape.
+  extra="$(fetch_issue_findings "$repo" "$head_sha" "$pr")"
   api_all "repos/$repo/pulls/$pr/comments" | jq -r "[ .[] | select(.user.login | startswith(\"$BOT\")) ]" \
   | jq --argjson shas "$shamap" --arg head "$head_sha" --arg headdate "$head_date" '
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
@@ -215,7 +273,10 @@ fetch_findings() {
                 end
             )
           }
-      ] | sort_by(.created_at) | reverse'
+      ]' \
+  | jq --argjson extra "$extra" '
+      # Two sources, one list. A finding is a finding whichever way it arrived.
+      . + $extra | sort_by(.created_at) | reverse'
 }
 
 # Codex leaves NO review object when it has nothing to say — it reacts 👍 on the
