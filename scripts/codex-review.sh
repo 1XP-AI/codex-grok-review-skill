@@ -108,17 +108,21 @@ need_pr() { [ -n "${1:-}" ] || die "missing <pr> (a pull request number)"; }
 # Derived from the head SHA rather than from the commit LIST, for the reason in
 # head_commit_sha below: that list stops at 250.
 head_commit_date() {
-  local sha
-  # Checked here, not left to `set -e`: head_commit_sha's own die() runs inside
-  # this command substitution's subshell, so it kills that subshell and the
-  # empty value flows on. The caller has to refuse it.
-  sha="$(head_commit_sha "$1" "$2")" \
-    || die "could not read the head commit of PR #$2 in $1."
-  [ -n "$sha" ] || die "PR #$2 in $1 reported no head commit — refusing to judge it."
-  gh api "repos/$1/commits/$sha" \
-    -q '.commit.committer.date // .commit.author.date // ""' \
-    || die "could not read the head commit ($sha). Not guessing: an empty date here makes every
-existing review look newer than the head, which reads as 'a verdict landed' for code nobody saw."
+  # The MAXIMUM commit date, not the head's own.
+  #
+  # This value only classifies findings that state no commit — the exact signal
+  # is the head SHA, which comes from the PR object and is never capped. A
+  # watermark, though, must not move backward, and the head's own date can: an
+  # imported commit keeps its original timestamp, so a head pushed today can be
+  # dated before its ancestors. A finding created after that push then compares
+  # as older than the head and is reported as current.
+  #
+  # The commit list is capped at 250 by GitHub, which is why the SHA is not taken
+  # from it. For a monotonic date the cap is acceptable: it can only make the
+  # watermark older, which errs toward calling a finding stale rather than
+  # inventing an open one.
+  api_all "repos/$1/pulls/$2/commits" \
+    | jq -r 'map(.commit.committer.date // .commit.author.date) | max // ""'
 }
 
 # review id → the commit that review inspected. Every Codex output states it as
@@ -305,15 +309,13 @@ sev_rank() { case "$1" in P1) echo 1;; P2) echo 2;; P3) echo 3;; *) echo 9;; esa
 
 cmd_json() {
   local repo pr head head_sha
-  repo="$(resolve_repo)"; pr="$1"
-  head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
+  repo="$(resolve_repo)"; pr="$1"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   fetch_findings "$repo" "$pr" "$head" "$head_sha"
 }
 
 print_findings() {
   local repo pr head head_sha all json count
-  repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"
-  head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
+  repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
 
   if [ "$all" = "open" ]; then
@@ -351,8 +353,7 @@ print_findings() {
 cmd_detail() {
   local repo pr head head_sha all json count ctx
   repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"
-  ctx="${CODEX_REVIEW_CONTEXT:-12}"
-  head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
+  ctx="${CODEX_REVIEW_CONTEXT:-12}"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
 
   if [ "$all" = "open" ]; then
@@ -405,8 +406,7 @@ cmd_status() {
   local repo pr head head_sha json open p1 reviews thumbs latest
   local clean clean_line clean_sha clean_at clean_matches_head
   repo="$(resolve_repo)"; pr="$1"
-  head="$(head_commit_date "$repo" "$pr")"
-  head_sha="$(head_commit_sha "$repo" "$pr")"
+  head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
   open="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)] | length')"
   p1="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true and .severity == "P1")] | length')"
@@ -496,7 +496,10 @@ settle_and_report() {
 }
 
 cmd_wait() {
-  local repo pr head deadline interval elapsed reviews thumbs latest
+  # No head_commit_date here: every check below uses the head SHA or the
+  # hashless-review count, so calling it only added an endpoint whose failure
+  # could stop a wait that did not need it.
+  local repo pr deadline interval elapsed reviews thumbs latest
   repo="$(resolve_repo)"; pr="$1"
   # Snapshot BEFORE the head lookups. A hashless review landing while those
   # requests are in flight would otherwise be indistinguishable from one that was
@@ -504,7 +507,6 @@ cmd_wait() {
   local reviews_at_entry reviews_now
   reviews_at_entry="$(hashless_review_count "$repo" "$pr")" \
     || die "could not read the reviews of PR #$pr in $repo."
-  head="$(head_commit_date "$repo" "$pr")"
   deadline="${CODEX_REVIEW_TIMEOUT:-1800}"
   interval="${CODEX_REVIEW_INTERVAL:-60}"
   # A review pass is not always one post — Codex has been observed splitting
