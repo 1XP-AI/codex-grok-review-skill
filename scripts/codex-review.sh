@@ -458,7 +458,7 @@ sev_rank() { case "$1" in P1) echo 1;; P2) echo 2;; P3) echo 3;; *) echo 9;; esa
 cmd_json() {
   local repo pr head head_sha
   repo="$(resolve_repo)"; pr="$1"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
-  fetch_findings "$repo" "$pr" "$head" "$head_sha"
+  fetch_findings_settled "$repo" "$pr" "$head" "$head_sha"
 }
 
 # THE verdict. One decision site, deliberately.
@@ -507,15 +507,46 @@ verdict_key() {
   echo open; return 2
 }
 
+# The findings snapshot, taken so a review landing mid-read cannot look like none.
+#
+# Two endpoints read in sequence, and the ORDER decides which way the race falls.
+# Findings-then-reviews was the dangerous direction: a review landing between them
+# left an empty finding list beside a nonzero review count, which walks the verdict
+# table straight to `clean`/0 — a merge permitted over findings that were arriving
+# as we looked. Reviews-then-findings fails the safe way instead: the count is the
+# older one and the findings are the newer, so anything that landed is IN the list.
+#
+# The reorder closes the window in the common case. It cannot close it entirely —
+# the two endpoints are separately consistent, so a review can still be visible
+# before its own comments are — which is what the re-read is for. Codex files a
+# review object only when it has something to say, so "a review, and nothing to
+# say" is not a resting state; seeing it means we looked too early.
+# $5 is the review count, if the caller already has one. It must have been read
+# BEFORE this call — that is the whole point — so anything that decides a verdict
+# reads it once, up front, and hands it down. Reading it again afterwards would
+# put the newest count beside the older findings and restore the bug.
+fetch_findings_settled() {
+  local repo="$1" pr="$2" head="$3" head_sha="$4" reviews="${5:-}" json total
+
+  [ -n "$reviews" ] || reviews="$(review_count "$repo" "$pr")"
+  json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
+  total="$(printf '%s' "$json" | jq 'length')"
+
+  if [ "$total" -eq 0 ] && [ "${reviews:-0}" -gt 0 ]; then
+    json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
+  fi
+
+  printf '%s' "$json"
+}
+
 # Every input `verdict_key` needs, gathered from the API. Kept next to it so a new
 # input cannot be added to one and forgotten in the other.
 verdict_for() {
-  local repo="$1" pr="$2" head_sha="$3" json="$4"
-  local open total reviews thumbs clean clean_line clean_sha matches
+  local repo="$1" pr="$2" head_sha="$3" json="$4" reviews="$5"
+  local open total thumbs clean clean_line clean_sha matches
 
   open="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)] | length')"
   total="$(printf '%s' "$json" | jq 'length')"
-  reviews="$(review_count "$repo" "$pr")"
   thumbs="$(has_thumbsup "$repo" "$pr")"
   clean="$(clean_verdicts "$repo" "$pr")"
   clean_line="$(printf '%s' "$clean" | tail -n 1)"
@@ -530,15 +561,17 @@ verdict_for() {
 }
 
 print_findings() {
-  local repo pr head head_sha all json count code
+  local repo pr head head_sha all json count code reviews
   repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
-  json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
+  # BEFORE the findings, and read once. See fetch_findings_settled.
+  reviews="$(review_count "$repo" "$pr")"
+  json="$(fetch_findings_settled "$repo" "$pr" "$head" "$head_sha" "$reviews")"
 
   # Decided on the UNFILTERED list, before `open` mode throws the stale ones away —
   # "all stale" and "none at all" are different verdicts and both look empty after.
   code=0
   if [ "$all" = "open" ]; then
-    verdict_for "$repo" "$pr" "$head_sha" "$json" >/dev/null || code=$?
+    verdict_for "$repo" "$pr" "$head_sha" "$json" "$reviews" >/dev/null || code=$?
     json="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)]')"
   fi
 
@@ -576,7 +609,7 @@ cmd_detail() {
   local repo pr head head_sha all json count ctx
   repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"
   ctx="${CODEX_REVIEW_CONTEXT:-12}"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
-  json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
+  json="$(fetch_findings_settled "$repo" "$pr" "$head" "$head_sha")"
 
   if [ "$all" = "open" ]; then
     json="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)]')"
@@ -635,10 +668,12 @@ cmd_status() {
   local clean clean_line clean_sha clean_at clean_matches_head
   repo="$(resolve_repo)"; pr="$1"
   head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
-  json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
+  # BEFORE the findings, and read once. A review landing between the two reads
+  # used to leave an empty list beside a nonzero count, which reads as CLEAN.
+  reviews="$(review_count "$repo" "$pr")"
+  json="$(fetch_findings_settled "$repo" "$pr" "$head" "$head_sha" "$reviews")"
   open="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)] | length')"
   p1="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true and .severity == "P1")] | length')"
-  reviews="$(review_count "$repo" "$pr")"
   # An issue-comment finding is evidence a review happened even when no review
   # object exists — otherwise `status` reports "not reviewed yet" while a P1 it
   # just listed sits on the PR.
@@ -794,7 +829,7 @@ cmd_wait() {
       || die "could not read the reviews of PR #$pr in $repo."
     if [ "${reviews_now:-0}" -gt "${reviews_at_entry:-0}" ]; then
       latest="$(activity_stamp "$repo" "$pr")"
-      echo "Review landed at ${latest:-now}."
+      echo "Review landed."
       settle_and_report "$repo" "$pr" "$latest"
       return $?
     fi

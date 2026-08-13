@@ -25,7 +25,8 @@ Add `--repo OWNER/REPO` when outside a checkout.
 
 Needs `gh` 2.44+ (for `api --slurp`); an older one is refused with a message.
 
-Exit codes for `status` / `findings`:
+Exit codes for `status` / `findings` — the same codes from both, decided in one
+place so they cannot drift (`findings` used to print open findings and exit `0`):
 `0` reviewed & clean · `2` open findings · `3` not reviewed yet · `4` findings all stale.
 
 ## What goes wrong without this
