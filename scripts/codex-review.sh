@@ -112,7 +112,9 @@ head_commit_date() {
   sha="$(head_commit_sha "$1" "$2")"
   [ -n "$sha" ] || { printf '\n'; return 0; }
   gh api "repos/$1/commits/$sha" \
-    -q '.commit.committer.date // .commit.author.date // ""' 2>/dev/null || true
+    -q '.commit.committer.date // .commit.author.date // ""' \
+    || die "could not read the head commit ($sha). Not guessing: an empty date here makes every
+existing review look newer than the head, which reads as 'a verdict landed' for code nobody saw."
 }
 
 # review id → the commit that review inspected. Every Codex output states it as
@@ -229,6 +231,30 @@ clean_verdicts() {
           | select(.body | test(\"[Dd]idn't find any major issues\"))
           | { created_at, sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
         ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\"" 2>/dev/null || true
+}
+
+# Has any Codex review stated THIS head commit as the one it reviewed?
+#
+# Exact, and the reason the timestamp comparison below is only a fallback: a
+# commit date can be OLDER than its ancestors (an imported commit keeps its
+# original date), and a watermark that moves backward makes an existing review
+# look like a verdict for code pushed after it.
+reviewed_head() {
+  local shas count
+  shas="$(review_shas "$1" "$2")" || return 1
+  # `.value` is bound BEFORE the pipe on purpose: inside `$head | startswith(...)`
+  # the input is $head, a string, and `.value` there indexes a string — jq dies,
+  # the count comes back empty, and an empty count read as "not zero" reported a
+  # verdict that had not landed.
+  count="$(printf '%s' "$shas" | jq -r --arg head "$3" '
+    [ to_entries[]
+      | select((.value | length) > 0)
+      | select(.value as $v | $head | startswith($v))
+    ] | length')" || return 1
+  case "$count" in
+    ''|*[!0-9]*) return 1 ;;  # not a number: say "could not tell", never "yes"
+    *) printf '%s' "$count" ;;
+  esac
 }
 
 # Full SHA of the PR's newest commit, for matching against `Reviewed commit`.
@@ -427,6 +453,24 @@ cmd_request() {
   echo "Then:  codex-review status $pr"
 }
 
+# Let a review pass go quiet before reporting it.
+#
+# Codex has been observed splitting one pass across posts seconds apart, so
+# returning on the first post reports a subset — and a caller whose merge rule is
+# "no P1" can be shown "P1: 0" while a P1 is still in flight.
+settle_and_report() {
+  local repo="$1" pr="$2" latest="$3" settle_prev="" settle_tries=0
+  while [ "$settle_tries" -lt "$settle_max" ] && [ "$latest" != "$settle_prev" ]; do
+    settle_prev="$latest"
+    sleep "$settle_secs"
+    latest="$(latest_review_date "$repo" "$pr")"
+    settle_tries=$((settle_tries + 1))
+  done
+  [ "$latest" != "$settle_prev" ] && echo "(more arrived — settled at $latest)"
+  cmd_status "$pr" || true
+  return 0
+}
+
 cmd_wait() {
   local repo pr head deadline interval elapsed reviews thumbs latest
   repo="$(resolve_repo)"; pr="$1"
@@ -440,9 +484,10 @@ cmd_wait() {
   settle_secs="${CODEX_REVIEW_SETTLE_SECONDS:-45}"
   settle_max="${CODEX_REVIEW_SETTLE_MAX_TRIES:-4}"
   elapsed=0
-  local head_sha clean_sha
+  local head_sha clean_sha started reviewed_n
   head_sha="$(head_commit_sha "$repo" "$pr")"
-  echo "Waiting for a Codex verdict on ${head_sha:0:10} (after $head, timeout ${deadline}s)..."
+  started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "Waiting for a Codex verdict on ${head_sha:0:10} (since $started, timeout ${deadline}s)..."
   while [ "$elapsed" -lt "$deadline" ]; do
     # Strongest signal: a clean verdict naming this exact commit.
     clean_sha="$(clean_verdicts "$repo" "$pr" | tail -n 1 | cut -f2)"
@@ -452,22 +497,22 @@ cmd_wait() {
       cmd_status "$pr" || true
       return 0
     fi
+    # A review that names this commit — exact, whatever the clocks say.
+    reviewed_n="$(reviewed_head "$repo" "$pr" "$head_sha" || echo 0)"
+    if [ -n "$head_sha" ] && [ "${reviewed_n:-0}" -gt 0 ]; then
+      latest="$(latest_review_date "$repo" "$pr")"
+      echo "Review landed at ${latest:-now}."
+      settle_and_report "$repo" "$pr" "$latest"
+      return $?
+    fi
     latest="$(latest_review_date "$repo" "$pr")"
-    if [ -n "$latest" ] && [ "$latest" \> "$head" ]; then
+    # Fallback for a review that states no commit at all. The watermark is when
+    # THIS wait started, which cannot move backward; the head commit's own date
+    # can, and using it let an old review satisfy this test.
+    if [ -n "$latest" ] && [ "$latest" \> "$started" ]; then
       echo "Review landed at $latest."
-      # Settle: keep looking until the newest review timestamp stops moving, so
-      # a pass split across several posts is reported whole.
-      settle_prev=""
-      settle_tries=0
-      while [ "$settle_tries" -lt "$settle_max" ] && [ "$latest" != "$settle_prev" ]; do
-        settle_prev="$latest"
-        sleep "$settle_secs"
-        latest="$(latest_review_date "$repo" "$pr")"
-        settle_tries=$((settle_tries + 1))
-      done
-      [ "$latest" != "$settle_prev" ] && echo "(more arrived — settled at $latest)"
-      cmd_status "$pr" || true
-      return 0
+      settle_and_report "$repo" "$pr" "$latest"
+      return $?
     fi
     sleep "$interval"
     elapsed=$((elapsed + interval))
