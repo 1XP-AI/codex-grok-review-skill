@@ -188,6 +188,7 @@ fetch_issue_findings() {
             path: $loc.path,
             line: (($loc.b // $loc.a) | tonumber),
             start_line: (if $loc.b == null then null else ($loc.a | tonumber) end),
+            source: "issue",
             anchored: true,
             reviewed_sha: $loc.sha,
             severity: (($c.body | capture("!\\[(?<sev>P[0-9]) Badge\\]") | .sev) // "—"),
@@ -235,6 +236,7 @@ fetch_findings() {
             id, path, diff_hunk,
             line:       (.line // .original_line),
             start_line: (.start_line // .original_start_line),
+            source:     "review",
             anchored:   (.line != null),
             created_at,
             url: .html_url,
@@ -347,15 +349,24 @@ hashless_review_count() {
   printf '%s' "$shas" | jq -r '[ to_entries[] | select((.value | length) == 0) ] | length'
 }
 
-# How many issue-comment findings name THIS head commit.
+# How many live issue-comment findings are in a snapshot ALREADY FETCHED.
 #
-# Their permalink carries the commit, so this is exact — and it is the only
-# signal that a review happened when Codex posted the result as a comment
-# instead of a review object.
-issue_findings_for_head() {
-  local head="$3"
-  fetch_issue_findings "$1" "$3" "$2" \
-    | jq -r --arg head "$head" '[ .[] | select(.stale | not) ] | length'
+# Counted from the merged list rather than fetched again on purpose. It used to be
+# its own API call, which meant two snapshots taken moments apart: a finding landing
+# between them produced total=0 with issue_open=1, and that combination fell through
+# the verdict table to `clean`, exit 0 — a P1 reported as a clean PR. One snapshot
+# cannot disagree with itself.
+issue_open_in() {
+  printf '%s' "$1" \
+    | jq '[ .[] | select(.source == "issue" and .stale == false and .anchored == true) ] | length'
+}
+
+# The same count, fetched, for `wait` — which holds no snapshot to be consistent
+# with and wants the freshest possible answer to "has anything landed yet".
+# One endpoint, so a failure here cannot take down a wait that the review count
+# could have answered on its own.
+issue_findings_now() {
+  fetch_issue_findings "$1" "$3" "$2" | jq '[ .[] | select(.stale | not) ] | length'
 }
 
 # Full SHA of the PR's newest commit, for matching against `Reviewed commit`.
@@ -380,6 +391,26 @@ head_commit_sha() {
 
 review_count() {
   api_all "repos/$1/pulls/$2/reviews" | jq -r "[.[] | select(.user.login | startswith(\"$BOT\"))] | length" 2>/dev/null || echo 0
+}
+
+# The fingerprint `wait` settles on: everything Codex has posted, both ways.
+#
+# Settling used to key off review submission dates alone. A pass delivered purely as
+# issue comments has no review object, so the stamp stayed "" from the first check to
+# the last, `latest == settle_prev` on entry, and the loop slept zero times — which
+# is precisely the case that made `wait` return a partial set. Codex has been seen
+# splitting one pass across posts seconds apart, so a second P1 could land just after
+# the report. Any new post of either kind now changes this string.
+activity_stamp() {
+  printf '%s|%s' \
+    "$(latest_review_date "$1" "$2")" \
+    "$(api_all "repos/$1/issues/$2/comments" \
+       | jq -r --arg bot "$BOT" '
+           [ .[]
+             | select(.user.login | startswith($bot))
+             | select(.body | test("!\\[P[0-9] Badge\\]") or test("major issues"))
+             | .created_at ]
+           | "\(length):\(max // "")"' 2>/dev/null)"
 }
 
 latest_review_date() {
@@ -422,6 +453,12 @@ verdict_key() {
       echo stale-clean; return 3
     fi
     if [ "$total" -gt 0 ]; then echo all-stale; return 4; fi
+    # A live issue finding with an empty list behind it is a contradiction, and it
+    # is reachable only if the two numbers came from different fetches. They do not
+    # any more — `issue_open` is counted out of the same snapshot as `open`. Should
+    # that ever stop being true, this reports uncertainty rather than the CLEAN it
+    # used to fall through to with a P1 sitting on the PR.
+    if [ "${issue_open:-0}" -gt 0 ]; then echo inconsistent; return 3; fi
     echo clean; return 0
   fi
 
@@ -447,7 +484,7 @@ verdict_for() {
   fi
 
   verdict_key "$open" "$total" "$reviews" "$thumbs" "$clean_line" "$matches" \
-    "$clean_sha" "$(issue_findings_for_head "$repo" "$pr" "$head_sha" 2>/dev/null || echo 0)"
+    "$clean_sha" "$(issue_open_in "$json")"
 }
 
 print_findings() {
@@ -563,8 +600,10 @@ cmd_status() {
   # An issue-comment finding is evidence a review happened even when no review
   # object exists — otherwise `status` reports "not reviewed yet" while a P1 it
   # just listed sits on the PR.
-  issue_open="$(issue_findings_for_head "$repo" "$pr" "$head_sha" 2>/dev/null || echo 0)"
+  issue_open="$(issue_open_in "$json")"
   thumbs="$(has_thumbsup "$repo" "$pr")"
+  # Displayed, not compared — the settle fingerprint is a different thing and
+  # printing it would put an opaque count in front of a human.
   latest="$(latest_review_date "$repo" "$pr")"
 
   clean="$(clean_verdicts "$repo" "$pr")"
@@ -610,6 +649,9 @@ cmd_status() {
       echo "                  Confirm they are addressed, then merge." ;;
     clean)
       echo "  VERDICT       : REVIEWED, CLEAN." ;;
+    inconsistent)
+      echo "  VERDICT       : INCONSISTENT — an issue-comment finding is live but the"
+      echo "                  finding list is empty. Re-run; do not read this as clean." ;;
     open)
       echo "  VERDICT       : $open OPEN FINDING(S) — address before merging."
       [ "$p1" -gt 0 ] && echo "                  ⚠ $p1 of them are P1." ;;
@@ -637,10 +679,11 @@ settle_and_report() {
   while [ "$settle_tries" -lt "$settle_max" ] && [ "$latest" != "$settle_prev" ]; do
     settle_prev="$latest"
     sleep "$settle_secs"
-    latest="$(latest_review_date "$repo" "$pr")"
+    latest="$(activity_stamp "$repo" "$pr")"
     settle_tries=$((settle_tries + 1))
   done
-  [ "$latest" != "$settle_prev" ] && echo "(more arrived — settled at $latest)"
+  # The stamp is a fingerprint, not a timestamp — say that something moved, not what.
+  [ "$latest" != "$settle_prev" ] && echo "(more arrived while settling — reporting the full set)"
   cmd_status "$pr" || true
   return 0
 }
@@ -687,10 +730,10 @@ cmd_wait() {
     # A finding can arrive as an ISSUE comment with no review object behind it.
     # Waiting only on reviews meant the command sat out its whole timeout while
     # the verdict — a P1, in the case that surfaced this — was already posted.
-    issue_n="$(issue_findings_for_head "$repo" "$pr" "$head_sha")" \
+    issue_n="$(issue_findings_now "$repo" "$pr" "$head_sha")" \
       || die "could not read the comments of PR #$pr in $repo."
     if [ -n "$head_sha" ] && { [ "${reviewed_n:-0}" -gt 0 ] || [ "${issue_n:-0}" -gt 0 ]; }; then
-      latest="$(latest_review_date "$repo" "$pr")"
+      latest="$(activity_stamp "$repo" "$pr")"
       echo "Review landed at ${latest:-now}."
       settle_and_report "$repo" "$pr" "$latest"
       return $?
@@ -703,7 +746,7 @@ cmd_wait() {
     reviews_now="$(hashless_review_count "$repo" "$pr")" \
       || die "could not read the reviews of PR #$pr in $repo."
     if [ "${reviews_now:-0}" -gt "${reviews_at_entry:-0}" ]; then
-      latest="$(latest_review_date "$repo" "$pr")"
+      latest="$(activity_stamp "$repo" "$pr")"
       echo "Review landed at ${latest:-now}."
       settle_and_report "$repo" "$pr" "$latest"
       return $?

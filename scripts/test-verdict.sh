@@ -38,9 +38,13 @@ t 'clean verdict names an older'  '0 3 1 0 "x" 0 abc 0' stale-clean  3
 t 'reviewed, all findings stale'  '0 3 1 0 "" 0 "" 0'   all-stale    4
 t 'reviewed, nothing filed'       '0 0 1 0 "" 0 "" 0'   clean        0
 t 'open findings'                 '2 5 1 0 "" 0 "" 0'   open         2
-# An issue-comment finding is the only trace some reviews leave; without it this row
-# read as not-reviewed while a P1 sat on the PR.
-t 'only an issue-comment finding' '0 0 0 0 "" 0 "" 1'   clean        0
+# An issue-comment finding is the only trace some reviews leave; without counting it
+# this row read as not-reviewed while a P1 sat on the PR. It is now counted out of the
+# same snapshot as `open`, so a live one always shows up in `open` and `total` too.
+t 'issue finding, no review object' '1 1 0 0 "" 0 "" 1'   open         2
+# The combination that cannot come from one snapshot. It could when `issue_open` was
+# its own fetch, and it fell straight through to clean/0 with a P1 on the PR.
+t 'live issue finding, empty list'  '0 0 0 0 "" 0 "" 1'   inconsistent 3
 # open beats a clean verdict: a later review can file against the same commit an
 # earlier one blessed.
 t 'open outranks a head-clean'    '2 5 1 0 "x" 1 abc 0' open         2
