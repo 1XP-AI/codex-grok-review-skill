@@ -104,8 +104,15 @@ resolve_repo() {
 need_pr() { [ -n "${1:-}" ] || die "missing <pr> (a pull request number)"; }
 
 # Newest commit timestamp on the PR. Findings older than this may be stale.
+#
+# Derived from the head SHA rather than from the commit LIST, for the reason in
+# head_commit_sha below: that list stops at 250.
 head_commit_date() {
-  api_all "repos/$1/pulls/$2/commits" | jq -r 'map(.commit.committer.date // .commit.author.date) | max // ""'
+  local sha
+  sha="$(head_commit_sha "$1" "$2")"
+  [ -n "$sha" ] || { printf '\n'; return 0; }
+  gh api "repos/$1/commits/$sha" \
+    -q '.commit.committer.date // .commit.author.date // ""' 2>/dev/null || true
 }
 
 # review id → the commit that review inspected. Every Codex output states it as
@@ -225,8 +232,15 @@ clean_verdicts() {
 }
 
 # Full SHA of the PR's newest commit, for matching against `Reviewed commit`.
+#
+# From the pull-request object, NOT from the commit list. "List commits on a pull
+# request" is capped at 250 by GitHub, so on a longer PR the last element is the
+# 250th commit and not the head at all — and a clean verdict naming THAT commit
+# would then be accepted as covering the newest code. The tool would answer
+# "REVIEWED, CLEAN" for code nobody reviewed, which is the one answer it must
+# never get wrong.
 head_commit_sha() {
-  api_all "repos/$1/pulls/$2/commits" | jq -r '.[-1].sha // ""' 2>/dev/null || true
+  gh api "repos/$1/pulls/$2" -q '.head.sha // ""' 2>/dev/null || true
 }
 
 review_count() {
