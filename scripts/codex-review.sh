@@ -109,8 +109,12 @@ need_pr() { [ -n "${1:-}" ] || die "missing <pr> (a pull request number)"; }
 # head_commit_sha below: that list stops at 250.
 head_commit_date() {
   local sha
-  sha="$(head_commit_sha "$1" "$2")"
-  [ -n "$sha" ] || { printf '\n'; return 0; }
+  # Checked here, not left to `set -e`: head_commit_sha's own die() runs inside
+  # this command substitution's subshell, so it kills that subshell and the
+  # empty value flows on. The caller has to refuse it.
+  sha="$(head_commit_sha "$1" "$2")" \
+    || die "could not read the head commit of PR #$2 in $1."
+  [ -n "$sha" ] || die "PR #$2 in $1 reported no head commit — refusing to judge it."
   gh api "repos/$1/commits/$sha" \
     -q '.commit.committer.date // .commit.author.date // ""' \
     || die "could not read the head commit ($sha). Not guessing: an empty date here makes every
@@ -266,7 +270,15 @@ reviewed_head() {
 # "REVIEWED, CLEAN" for code nobody reviewed, which is the one answer it must
 # never get wrong.
 head_commit_sha() {
-  gh api "repos/$1/pulls/$2" -q '.head.sha // ""' 2>/dev/null || true
+  local sha
+  # No `|| true`. An unknown head is not an empty head: with it empty, the date
+  # below comes back empty too, every older review compares as current, and
+  # `status` answers REVIEWED, CLEAN without ever knowing which commit is live.
+  # A pull request always has a head, so failing to read one is a failure.
+  sha="$(gh api "repos/$1/pulls/$2" -q '.head.sha // ""')" \
+    || die "could not read PR #$2 of $1 — refusing to judge a PR whose head is unknown."
+  [ -n "$sha" ] || die "PR #$2 of $1 reported no head commit."
+  printf '%s' "$sha"
 }
 
 review_count() {
@@ -473,6 +485,11 @@ settle_and_report() {
 
 cmd_wait() {
   local repo pr head deadline interval elapsed reviews thumbs latest
+  # BEFORE any request. A hashless review landing while the head lookups are in
+  # flight carries a timestamp older than a watermark taken after them, and the
+  # strict comparison then ignores it until this command times out.
+  local started
+  started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   repo="$(resolve_repo)"; pr="$1"
   head="$(head_commit_date "$repo" "$pr")"
   deadline="${CODEX_REVIEW_TIMEOUT:-1800}"
@@ -484,9 +501,8 @@ cmd_wait() {
   settle_secs="${CODEX_REVIEW_SETTLE_SECONDS:-45}"
   settle_max="${CODEX_REVIEW_SETTLE_MAX_TRIES:-4}"
   elapsed=0
-  local head_sha clean_sha started reviewed_n
+  local head_sha clean_sha reviewed_n
   head_sha="$(head_commit_sha "$repo" "$pr")"
-  started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "Waiting for a Codex verdict on ${head_sha:0:10} (since $started, timeout ${deadline}s)..."
   while [ "$elapsed" -lt "$deadline" ]; do
     # Strongest signal: a clean verdict naming this exact commit.
