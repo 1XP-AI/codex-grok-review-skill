@@ -12,6 +12,41 @@ BOT="chatgpt-codex-connector"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# ── Fetch every page as ONE array, then filter ───────────────────────────────
+#
+# `gh api --paginate --jq EXPR` runs EXPR against each page SEPARATELY and prints
+# a result per page. So `[...] | length` answers "100\n91" on a PR with 191 review
+# comments, and the arithmetic downstream — `[ "$n" -gt 0 ]` — dies with
+# "integer expression expected", taking the VERDICT line with it. It only shows up
+# past 100 comments, which is to say on exactly the long-running PRs this loop
+# exists for.
+#
+# `--slurp` cannot be combined with `--jq`, so the merging and the filtering have
+# to be separate steps.
+#
+# Always emits a JSON array, so callers can pipe into jq without guarding: an
+# unreachable API becomes "nothing found", never a syntax error mid-pipeline.
+api_all() {
+  local out errfile err rc=0
+  errfile="$(mktemp)"
+  out="$(gh api "$1" --paginate --slurp 2>"$errfile")" || rc=$?
+  err="$(cat "$errfile" 2>/dev/null || true)"
+  rm -f "$errfile"
+  if [ "$rc" -ne 0 ]; then
+    # A gh too old for --slurp would otherwise look like "no findings" on every
+    # PR, which is the most expensive way to be wrong. Name it instead.
+    case "$err" in
+      *slurp*) die "this gh does not support 'api --slurp' (needs gh >= 2.44). Upgrade gh." ;;
+    esac
+    # Everything else — 404, auth, rate limit — propagates exactly as it did
+    # before this helper existed. Callers that mean to tolerate a failure say so
+    # themselves (`|| echo 0`); the rest should still stop.
+    printf '%s\n' "$err" >&2
+    return "$rc"
+  fi
+  printf '%s' "$out" | jq '[ .[][] ]'
+}
+
 command -v gh >/dev/null || die "gh CLI not found"
 command -v jq >/dev/null || die "jq not found"
 
@@ -69,17 +104,32 @@ resolve_repo() {
 need_pr() { [ -n "${1:-}" ] || die "missing <pr> (a pull request number)"; }
 
 # Newest commit timestamp on the PR. Findings older than this may be stale.
+#
+# Derived from the head SHA rather than from the commit LIST, for the reason in
+# head_commit_sha below: that list stops at 250.
 head_commit_date() {
-  gh api "repos/$1/pulls/$2/commits" --paginate \
-    -q 'map(.commit.committer.date // .commit.author.date) | max // ""'
+  # The MAXIMUM commit date, not the head's own.
+  #
+  # This value only classifies findings that state no commit — the exact signal
+  # is the head SHA, which comes from the PR object and is never capped. A
+  # watermark, though, must not move backward, and the head's own date can: an
+  # imported commit keeps its original timestamp, so a head pushed today can be
+  # dated before its ancestors. A finding created after that push then compares
+  # as older than the head and is reported as current.
+  #
+  # The commit list is capped at 250 by GitHub, which is why the SHA is not taken
+  # from it. For a monotonic date the cap is acceptable: it can only make the
+  # watermark older, which errs toward calling a finding stale rather than
+  # inventing an open one.
+  api_all "repos/$1/pulls/$2/commits" \
+    | jq -r 'map(.commit.committer.date // .commit.author.date) | max // ""'
 }
 
 # review id → the commit that review inspected. Every Codex output states it as
 #   **Reviewed commit:** `<sha10>`
 # which is far better than guessing from timestamps.
 review_shas() {
-  gh api "repos/$1/pulls/$2/reviews" --paginate \
-    -q "[ .[]
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "[ .[]
           | select(.user.login | startswith(\"$BOT\"))
           | { key: (.id | tostring),
               value: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
@@ -98,8 +148,7 @@ review_shas() {
 fetch_findings() {
   local repo="$1" pr="$2" head_date="$3" head_sha="$4" shamap
   shamap="$(review_shas "$repo" "$pr")"
-  gh api "repos/$repo/pulls/$pr/comments" --paginate \
-    --jq "[ .[] | select(.user.login | startswith(\"$BOT\")) ]" \
+  api_all "repos/$repo/pulls/$pr/comments" | jq -r "[ .[] | select(.user.login | startswith(\"$BOT\")) ]" \
   | jq --argjson shas "$shamap" --arg head "$head_sha" --arg headdate "$head_date" '
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
       # Codex states what to do in its FINAL SENTENCE, and when that sentence also
@@ -172,8 +221,7 @@ fetch_findings() {
 # Codex leaves NO review object when it has nothing to say — it reacts 👍 on the
 # PR instead. So "zero reviews" is ambiguous unless you also check reactions.
 has_thumbsup() {
-  gh api "repos/$1/issues/$2/reactions" --paginate \
-    -q "[.[] | select((.user.login | startswith(\"$BOT\")) and .content == \"+1\")] | length" \
+  api_all "repos/$1/issues/$2/reactions" | jq -r "[.[] | select((.user.login | startswith(\"$BOT\")) and .content == \"+1\")] | length" \
     2>/dev/null || echo 0
 }
 
@@ -186,42 +234,88 @@ has_thumbsup() {
 # on it. The `Reviewed commit` hash is the valuable part: unlike a 👍 reaction, it
 # proves WHICH commit was reviewed. Emits "<iso8601>\t<sha>" per clean verdict.
 clean_verdicts() {
-  gh api "repos/$1/issues/$2/comments" --paginate \
-    -q "[ .[]
+  api_all "repos/$1/issues/$2/comments" | jq -r "[ .[]
           | select(.user.login | startswith(\"$BOT\"))
           | select(.body | test(\"[Dd]idn't find any major issues\"))
           | { created_at, sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
         ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\"" 2>/dev/null || true
 }
 
+# Has any Codex review stated THIS head commit as the one it reviewed?
+#
+# Exact, and the reason the timestamp comparison below is only a fallback: a
+# commit date can be OLDER than its ancestors (an imported commit keeps its
+# original date), and a watermark that moves backward makes an existing review
+# look like a verdict for code pushed after it.
+reviewed_head() {
+  local shas count
+  shas="$(review_shas "$1" "$2")" || return 1
+  # `.value` is bound BEFORE the pipe on purpose: inside `$head | startswith(...)`
+  # the input is $head, a string, and `.value` there indexes a string — jq dies,
+  # the count comes back empty, and an empty count read as "not zero" reported a
+  # verdict that had not landed.
+  count="$(printf '%s' "$shas" | jq -r --arg head "$3" '
+    [ to_entries[]
+      | select((.value | length) > 0)
+      | select(.value as $v | $head | startswith($v))
+    ] | length')" || return 1
+  case "$count" in
+    ''|*[!0-9]*) return 1 ;;  # not a number: say "could not tell", never "yes"
+    *) printf '%s' "$count" ;;
+  esac
+}
+
+# How many Codex reviews state NO commit at all.
+#
+# The count the fallback watches. Counting every review instead let a review that
+# names a DIFFERENT commit satisfy it: Codex starts on A, B is pushed, waiting on
+# B rejects A by hash and then accepts the same review as "something new arrived".
+# A review that names a commit is answered by hash or not at all.
+hashless_review_count() {
+  local shas
+  shas="$(review_shas "$1" "$2")" || return 1
+  printf '%s' "$shas" | jq -r '[ to_entries[] | select((.value | length) == 0) ] | length'
+}
+
 # Full SHA of the PR's newest commit, for matching against `Reviewed commit`.
+#
+# From the pull-request object, NOT from the commit list. "List commits on a pull
+# request" is capped at 250 by GitHub, so on a longer PR the last element is the
+# 250th commit and not the head at all — and a clean verdict naming THAT commit
+# would then be accepted as covering the newest code. The tool would answer
+# "REVIEWED, CLEAN" for code nobody reviewed, which is the one answer it must
+# never get wrong.
 head_commit_sha() {
-  gh api "repos/$1/pulls/$2/commits" --paginate -q '.[-1].sha // ""' 2>/dev/null || true
+  local sha
+  # No `|| true`. An unknown head is not an empty head: with it empty, the date
+  # below comes back empty too, every older review compares as current, and
+  # `status` answers REVIEWED, CLEAN without ever knowing which commit is live.
+  # A pull request always has a head, so failing to read one is a failure.
+  sha="$(gh api "repos/$1/pulls/$2" -q '.head.sha // ""')" \
+    || die "could not read PR #$2 of $1 — refusing to judge a PR whose head is unknown."
+  [ -n "$sha" ] || die "PR #$2 of $1 reported no head commit."
+  printf '%s' "$sha"
 }
 
 review_count() {
-  gh api "repos/$1/pulls/$2/reviews" --paginate \
-    -q "[.[] | select(.user.login | startswith(\"$BOT\"))] | length" 2>/dev/null || echo 0
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "[.[] | select(.user.login | startswith(\"$BOT\"))] | length" 2>/dev/null || echo 0
 }
 
 latest_review_date() {
-  gh api "repos/$1/pulls/$2/reviews" --paginate \
-    -q "[.[] | select(.user.login | startswith(\"$BOT\")) | .submitted_at] | max // \"\"" 2>/dev/null
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "[.[] | select(.user.login | startswith(\"$BOT\")) | .submitted_at] | max // \"\"" 2>/dev/null
 }
 
 sev_rank() { case "$1" in P1) echo 1;; P2) echo 2;; P3) echo 3;; *) echo 9;; esac; }
 
 cmd_json() {
   local repo pr head head_sha
-  repo="$(resolve_repo)"; pr="$1"
-  head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
+  repo="$(resolve_repo)"; pr="$1"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   fetch_findings "$repo" "$pr" "$head" "$head_sha"
 }
 
 print_findings() {
   local repo pr head head_sha all json count
-  repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"
-  head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
+  repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
 
   if [ "$all" = "open" ]; then
@@ -259,8 +353,7 @@ print_findings() {
 cmd_detail() {
   local repo pr head head_sha all json count ctx
   repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"
-  ctx="${CODEX_REVIEW_CONTEXT:-12}"
-  head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
+  ctx="${CODEX_REVIEW_CONTEXT:-12}"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
 
   if [ "$all" = "open" ]; then
@@ -313,8 +406,7 @@ cmd_status() {
   local repo pr head head_sha json open p1 reviews thumbs latest
   local clean clean_line clean_sha clean_at clean_matches_head
   repo="$(resolve_repo)"; pr="$1"
-  head="$(head_commit_date "$repo" "$pr")"
-  head_sha="$(head_commit_sha "$repo" "$pr")"
+  head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   json="$(fetch_findings "$repo" "$pr" "$head" "$head_sha")"
   open="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)] | length')"
   p1="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true and .severity == "P1")] | length')"
@@ -385,10 +477,36 @@ cmd_request() {
   echo "Then:  codex-review status $pr"
 }
 
+# Let a review pass go quiet before reporting it.
+#
+# Codex has been observed splitting one pass across posts seconds apart, so
+# returning on the first post reports a subset — and a caller whose merge rule is
+# "no P1" can be shown "P1: 0" while a P1 is still in flight.
+settle_and_report() {
+  local repo="$1" pr="$2" latest="$3" settle_prev="" settle_tries=0
+  while [ "$settle_tries" -lt "$settle_max" ] && [ "$latest" != "$settle_prev" ]; do
+    settle_prev="$latest"
+    sleep "$settle_secs"
+    latest="$(latest_review_date "$repo" "$pr")"
+    settle_tries=$((settle_tries + 1))
+  done
+  [ "$latest" != "$settle_prev" ] && echo "(more arrived — settled at $latest)"
+  cmd_status "$pr" || true
+  return 0
+}
+
 cmd_wait() {
-  local repo pr head deadline interval elapsed reviews thumbs latest
+  # No head_commit_date here: every check below uses the head SHA or the
+  # hashless-review count, so calling it only added an endpoint whose failure
+  # could stop a wait that did not need it.
+  local repo pr deadline interval elapsed reviews thumbs latest
   repo="$(resolve_repo)"; pr="$1"
-  head="$(head_commit_date "$repo" "$pr")"
+  # Snapshot BEFORE the head lookups. A hashless review landing while those
+  # requests are in flight would otherwise be indistinguishable from one that was
+  # already there, and this command would wait out its whole timeout for it.
+  local reviews_at_entry reviews_now
+  reviews_at_entry="$(hashless_review_count "$repo" "$pr")" \
+    || die "could not read the reviews of PR #$pr in $repo."
   deadline="${CODEX_REVIEW_TIMEOUT:-1800}"
   interval="${CODEX_REVIEW_INTERVAL:-60}"
   # A review pass is not always one post — Codex has been observed splitting
@@ -398,9 +516,9 @@ cmd_wait() {
   settle_secs="${CODEX_REVIEW_SETTLE_SECONDS:-45}"
   settle_max="${CODEX_REVIEW_SETTLE_MAX_TRIES:-4}"
   elapsed=0
-  local head_sha clean_sha
+  local head_sha clean_sha reviewed_n
   head_sha="$(head_commit_sha "$repo" "$pr")"
-  echo "Waiting for a Codex verdict on ${head_sha:0:10} (after $head, timeout ${deadline}s)..."
+  echo "Waiting for a Codex verdict on ${head_sha:0:10} (timeout ${deadline}s)..."
   while [ "$elapsed" -lt "$deadline" ]; do
     # Strongest signal: a clean verdict naming this exact commit.
     clean_sha="$(clean_verdicts "$repo" "$pr" | tail -n 1 | cut -f2)"
@@ -410,22 +528,30 @@ cmd_wait() {
       cmd_status "$pr" || true
       return 0
     fi
-    latest="$(latest_review_date "$repo" "$pr")"
-    if [ -n "$latest" ] && [ "$latest" \> "$head" ]; then
-      echo "Review landed at $latest."
-      # Settle: keep looking until the newest review timestamp stops moving, so
-      # a pass split across several posts is reported whole.
-      settle_prev=""
-      settle_tries=0
-      while [ "$settle_tries" -lt "$settle_max" ] && [ "$latest" != "$settle_prev" ]; do
-        settle_prev="$latest"
-        sleep "$settle_secs"
-        latest="$(latest_review_date "$repo" "$pr")"
-        settle_tries=$((settle_tries + 1))
-      done
-      [ "$latest" != "$settle_prev" ] && echo "(more arrived — settled at $latest)"
-      cmd_status "$pr" || true
-      return 0
+    # A review that names this commit — exact, whatever the clocks say.
+    # A lookup that FAILED is not a lookup that found nothing. Swallowing it here
+    # made `wait` spin to its 1800s timeout printing the same error each round,
+    # when the honest answer was available on the first try.
+    reviewed_n="$(reviewed_head "$repo" "$pr" "$head_sha")" \
+      || die "could not read the reviews of PR #$pr in $repo."
+    if [ -n "$head_sha" ] && [ "${reviewed_n:-0}" -gt 0 ]; then
+      latest="$(latest_review_date "$repo" "$pr")"
+      echo "Review landed at ${latest:-now}."
+      settle_and_report "$repo" "$pr" "$latest"
+      return $?
+    fi
+    # Fallback for a review that states no commit at all: has one APPEARED since
+    # this command started? Counted, not timed. GitHub's submitted_at has
+    # one-second resolution, so a review arriving in the same second as the
+    # watermark compared equal and was ignored until the timeout — and any
+    # timestamp watermark has some version of that edge. A count does not.
+    reviews_now="$(hashless_review_count "$repo" "$pr")" \
+      || die "could not read the reviews of PR #$pr in $repo."
+    if [ "${reviews_now:-0}" -gt "${reviews_at_entry:-0}" ]; then
+      latest="$(latest_review_date "$repo" "$pr")"
+      echo "Review landed at ${latest:-now}."
+      settle_and_report "$repo" "$pr" "$latest"
+      return $?
     fi
     sleep "$interval"
     elapsed=$((elapsed + interval))
