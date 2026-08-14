@@ -1,0 +1,32 @@
+# The wrapper decides whether a PR is safe to merge, so its own gate is worth having.
+#
+# No network here: every check is local. The verdict table sources the real function
+# rather than a copy, so a rule change that nobody reflected in the table fails here.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: syntax
+        run: for f in scripts/*.sh; do bash -n "$f"; done
+
+      - name: shellcheck
+        run: shellcheck -S warning scripts/*.sh
+
+      - name: verdict table
+        run: bash scripts/test-verdict.sh
+
+      - name: snapshot ordering
+        run: bash scripts/test-snapshot.sh

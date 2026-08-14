@@ -8,9 +8,36 @@ composing `gh` calls by hand.
 
 ## Rules
 
-1. **Never read findings from `gh pr view --json comments`.** Codex posts *inline
-   review comments*; that field only carries issue comments, so the bot is simply
-   absent from it. Use `gh api repos/OWNER/REPO/pulls/N/comments`.
+1. **Findings arrive on two endpoints. Read both.** Most are *inline review comments*
+   (`gh api repos/OWNER/REPO/pulls/N/comments`) — `gh pr view --json comments` carries
+   only issue comments, so the bot is simply absent from it. But Codex also files
+   findings as issue comments (`gh api repos/OWNER/REPO/issues/N/comments`), same badge
+   and severity, anchored by a blob permalink in the body rather than by `path`/`line`:
+
+   ```
+   ### 💡 Codex Review
+
+   https://github.com/O/R/blob/cf125d41c7/packages/api/src/routes/auth.ts#L169
+   **<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Move sign-in keying after body parsing**
+
+   With `@fastify/rate-limit` using its default `onRequest` hook, the POST body has not
+   been parsed when ...
+
+   AGENTS.md reference: [AGENTS.md:L327-L335](https://github.com/O/R/blob/cf125d41c7/AGENTS.md#L327-L335)
+   ```
+
+   Reading only the review endpoint drops these silently — the wrapper reported CLEAN on
+   a PR carrying an open P1 until it learned to read both. Three things about that shape
+   are load-bearing, and all three were got wrong first:
+
+   - The **permalink precedes the badge**, and carries the path, the line (`#L169`, or a
+     range `#L12-L14` — keep both ends), and the commit the finding was made against.
+     That SHA is what `original_commit_id` is for an inline finding; compare it to the
+     PR head to decide staleness.
+   - The badge sits **inside** the `**...**` and is wrapped in `<sub>`, sometimes doubled,
+     sometimes absent. Anchoring the title regex on the wrappers yields `(untitled)`.
+   - A **second** blob permalink may follow, pointing at the AGENTS.md rule the finding
+     cites. Take the first match — and do not mistake its `#L327-L335` for the location.
 
 2. **Never strip markdown from a finding before reading its severity.** The
    `P1`/`P2`/`P3` level is a badge image at the start of the body:
@@ -91,4 +118,11 @@ gh api repos/O/R/pulls/N/reviews   -q 'length'
 gh api repos/O/R/issues/N/reactions -q '[.[] | "\(.user.login):\(.content)"]'
 gh api repos/O/R/pulls/N/commits   -q 'map(.commit.committer.date) | max'
 gh api repos/O/R/pulls/N/comments  -q '.[] | "\(.commit_id[0:10]) vs \(.original_commit_id[0:10])"'
+
+# Findings filed as issue comments — invisible to every probe above.
+gh api repos/O/R/issues/N/comments -q '[.[] | select(.body | test("!\\[P[0-9] Badge\\]"))] | length'
 ```
+
+That last probe is how the two-endpoint rule was found. On `1XP-AI/solana-world-soccer-2026`
+PR #591 it printed `1` while `pulls/591/comments` held no live finding at all — a P1
+(`Move sign-in keying after body parsing`) that the wrapper had been reporting as CLEAN.

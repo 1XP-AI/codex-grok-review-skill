@@ -25,13 +25,19 @@ Add `--repo OWNER/REPO` when outside a checkout.
 
 Needs `gh` 2.44+ (for `api --slurp`); an older one is refused with a message.
 
-Exit codes for `status` / `findings`:
+Exit codes for `status` / `findings` — the same codes from both, decided in one
+place so they cannot drift (`findings` used to print open findings and exit `0`):
 `0` reviewed & clean · `2` open findings · `3` not reviewed yet · `4` findings all stale.
 
 ## What goes wrong without this
 
-1. **`gh pr view --json comments` omits findings entirely.** They are review comments,
-   not issue comments. Correct source: `gh api repos/O/R/pulls/N/comments`.
+1. **Findings live on two endpoints, and `gh pr view --json comments` shows neither
+   completely.** Most are inline review comments (`gh api repos/O/R/pulls/N/comments`),
+   but Codex also posts findings as plain issue comments
+   (`gh api repos/O/R/issues/N/comments`) — same badge, same severity, but anchored by
+   a blob permalink in the body instead of by `path`/`line`. Reading only the review
+   endpoint silently drops those; a P1 sat unread on PR #591 that way. The wrapper reads
+   both and normalises them into one list.
 2. **Severity is a markdown image badge.** Stripping "markdown noise" deletes the
    `P1`/`P2`/`P3` you need to decide whether to merge — and it fails silently.
 3. **No findings ⇒ no review object.** The verdict is an *issue* comment:
@@ -44,6 +50,8 @@ Exit codes for `status` / `findings`:
    finding reports HEAD. Use **`original_commit_id`** — it never moves and matches the
    `Reviewed commit: <sha>` hash in the parent review's body. A finding is live only
    when `original_commit_id` is the PR's newest commit **and** `line != null`.
+   An issue-comment finding has no `original_commit_id`; its permalink SHA plays that
+   role, and it never goes `line == null` because nothing re-anchors it.
 
 ## Procedure
 
