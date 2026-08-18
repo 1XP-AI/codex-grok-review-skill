@@ -60,6 +60,13 @@ composing `gh` calls by hand.
    commit was cleared. A `+1` reaction also appears but is untimestamped, so it can
    never vouch for a specific commit.
 
+   **Check BOTH endpoints for that verdict.** It lands either as an issue comment or
+   as the body of a review object, and reading one of the two reports a cleared PR as
+   unreviewed. Measured on PR #4 of this repo: two commits cleared by issue comment,
+   two by review body. Merge them, and normalise `submitted_at` against `created_at`
+   before taking the latest — otherwise the newest verdict is whichever key happened
+   to exist.
+
 4. **Distinguish live findings from re-anchored ones — and do not trust `commit_id`.**
    GitHub moves old comments onto new line numbers, so resolved findings look current.
    Worse, it drags `commit_id` forward to the newest commit as it re-anchors, so that
@@ -127,6 +134,10 @@ its output. Useful probes:
 ```bash
 gh api repos/O/R/pulls/N/comments  -q '[.[] | select((.user.login|startswith("chatgpt-codex-connector")) or (.user.login=="1xp-dorami" and (.body|test("!\\[P[0-9] Badge\\]"))))] | length'
 gh api repos/O/R/pulls/N/reviews   -q 'length'
+
+# Clean verdicts hide on BOTH endpoints. Reading one calls a cleared PR unreviewed.
+gh api repos/O/R/issues/N/comments -q '[.[] | select(.body // "" | test("major issues"))] | length'
+gh api repos/O/R/pulls/N/reviews   -q '[.[] | select(.body // "" | test("major issues"))] | length'
 gh api repos/O/R/issues/N/reactions -q '[.[] | "\(.user.login):\(.content)"]'
 gh api repos/O/R/pulls/N/commits   -q 'map(.commit.committer.date) | max'
 gh api repos/O/R/pulls/N/comments  -q '.[] | "\(.commit_id[0:10]) vs \(.original_commit_id[0:10])"'

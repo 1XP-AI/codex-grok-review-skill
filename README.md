@@ -56,7 +56,7 @@ Cleaning "markdown noise" with something like
 rule is "no P1 findings", stripping the badge makes that rule unenforceable — and it
 fails silently, because the text still reads fine.
 
-### 3. No findings ⇒ **no review object at all** — the verdict is an issue comment
+### 3. No findings ⇒ no findings review — and the verdict lands on **either endpoint**
 
 When Codex has nothing to say it does **not** submit a review. It leaves an *issue*
 comment and reacts `+1`:
@@ -71,13 +71,30 @@ Codex Review: Didn't find any major issues. Breezy!
 **Reviewed commit:** `d94a859dde`
 ```
 
-Grok uses the same two fixed fields, as an issue comment, posted as `1xp-dorami`:
+Grok uses the same two fixed fields, posted as `1xp-dorami`:
 
 ```
 Grok Review: Didn't find any major issues. 🚀
 
 **Reviewed commit:** `d94a859dde`
 ```
+
+**And a clean verdict is not always an issue comment.** The same two fields also
+arrive as the **body of a review object**, and which one you get is not yours to
+choose. Reading only `issues/N/comments` reports "no clean verdict" for a PR that
+was cleared — the caller sees exit `3`, reviewed code called unreviewed:
+
+```bash
+# PR #4 of this repo. Two commits cleared by issue comment, two by review body.
+gh api repos/OWNER/REPO/issues/4/comments \
+  -q '[.[] | select(.body | test("major issues"))] | length'   # 2
+gh api repos/OWNER/REPO/pulls/4/reviews \
+  -q '[.[] | select(.body // "" | test("major issues"))] | length'   # 2  ← missed
+```
+
+So verdicts are merged from both endpoints, exactly as findings are in trap 1.
+Review objects date with `submitted_at` and issue comments with `created_at`, so
+the two are normalised before sorting — otherwise "the latest verdict" is a guess.
 
 A random `1xp-dorami` comment is **not** a review. Require `![P0 Badge]`–`![P4 Badge]`
 or `Didn't find any major issues`. An open badge from either author makes `status`

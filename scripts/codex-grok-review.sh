@@ -451,19 +451,49 @@ has_thumbsup() {
 # fetch. Asking clean_verdicts once per reviewer would re-read every issue comment
 # on the PR each time, and three reads of the same endpoint can disagree with each
 # other — the split-snapshot bug `issue_open_in` exists to avoid.
+# TWO ENDPOINTS, one verdict list — the same split findings already have.
+#
+# A clean verdict arrives either as an issue comment or as the BODY of a review
+# object, and which one you get is not yours to choose. Reading only
+# `issues/N/comments` therefore reports "no clean verdict" for a PR that was
+# cleared, and the caller sees `stale-clean`/3: reviewed code called unreviewed.
+#
+# Measured on PR #4 of this repo — the same PR that added REQUIRED_REVIEWERS:
+#
+#   e8949ab, b8b4a65   cleared by issue comment   → seen
+#   3b017ea, 227c4ca   cleared by review body     → invisible
+#
+# `status` put the newest verdict at b8b4a65 and answered stale-clean/3 while
+# Grok had in fact cleared HEAD minutes earlier. This is trap 1 and trap 3 of the
+# README wearing a different hat: findings are merged from both endpoints, and
+# verdicts have to be too.
+#
+# Review objects date with `submitted_at`, issue comments with `created_at`, so
+# the two are normalised to one field before sorting — otherwise the merged list
+# orders by whichever key happened to exist and the LATEST verdict is a guess.
+# Emits "<iso8601>\t<sha>\t<who>" per verdict; $3 = all|codex|grok (default all).
+#
+# The third column is what lets `missing_reviewers` answer per author without
+# re-fetching. Asking once per reviewer would re-read every comment on the PR
+# each time, and repeated reads of one endpoint can disagree with each other —
+# the split-snapshot bug `issue_open_in` exists to avoid.
 clean_verdicts() {
-  local who="${3:-all}"
-  api_all "repos/$1/issues/$2/comments" | jq -r --arg who "$who" "${JQ_REVIEWER_LIB}[ .[]
+  local repo="$1" pr="$2" who="${3:-all}" comments reviews
+  # Tolerated separately, so one unreachable endpoint cannot blank out the other.
+  comments="$(api_all "repos/$repo/issues/$pr/comments" 2>/dev/null || printf '[]')"
+  reviews="$(api_all "repos/$repo/pulls/$pr/reviews" 2>/dev/null || printf '[]')"
+  printf '%s\n%s\n' "$comments" "$reviews" \
+  | jq -rs --arg who "$who" "${JQ_REVIEWER_LIB}[ .[][]
           | select(is_reviewer)
-          | select(.body | is_clean_body)
+          | select(.body // \"\" | is_clean_body)
           | select(
               if \$who == \"codex\" then (.user.login | is_codex)
               elif \$who == \"grok\" then (.user.login | is_grok)
               else true end)
-          | { created_at,
+          | { at: (.submitted_at // .created_at // \"\"),
               sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\"),
               who: (if (.user.login | is_codex) then \"codex\" else \"grok\" end) }
-        ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\\t\\(.who)\"" 2>/dev/null || true
+        ] | sort_by(.at) | .[] | \"\\(.at)\\t\\(.sha)\\t\\(.who)\"" 2>/dev/null || true
 }
 
 # Has $3 filed a clean verdict naming commit $2, given the snapshot $1?
