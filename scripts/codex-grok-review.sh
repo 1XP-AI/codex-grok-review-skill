@@ -260,9 +260,10 @@ review_shas() {
 # The permalink carries MORE than the review-comment form: the commit, the path
 # and the line are all in the URL, so staleness here is exact rather than dated.
 fetch_issue_findings() {
-  local repo="$1" head_sha="$2"
+  # $4 (head_date) is optional. `wait` has no date to give — see issue_findings_now.
+  local repo="$1" head_sha="$2" head_date="${4:-}"
   api_all "repos/$repo/issues/$3/comments" \
-  | jq --arg head "$head_sha" "${JQ_REVIEWER_LIB}"'
+  | jq --arg head "$head_sha" --arg headdate "$head_date" "${JQ_REVIEWER_LIB}"'
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
       def _hv: {"0":0,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,
                 "a":10,"b":11,"c":12,"d":13,"e":14,"f":15}[ascii_downcase];
@@ -301,11 +302,79 @@ fetch_issue_findings() {
         | . as $c
         # Ranged permalinks exist (#L12-L14). Both ends are kept: reporting only
         # the first turns a reviewed range into a single line.
-        | ($c.body | capture("blob/(?<sha>[0-9a-f]{7,40})/(?<path>[^#\\s]+)#L(?<a>[0-9]+)(-L(?<b>[0-9]+))?")) as $loc
+        #
+        # And it FALLS BACK, because `capture` emits nothing when it does not
+        # match and `as` over an empty stream drops the whole element. Every
+        # other field below is guarded with `//`; this one was not, so a
+        # badge-carrying comment whose body has no blob permalink disappeared
+        # from the list entirely — the CLEAN-over-an-open-P1 answer this reader
+        # exists to prevent, arriving by a second route. Measured: three badge
+        # comments in, one out.
+        #
+        # The permalink is a Codex habit, not a contract; nothing makes Grok
+        # follow it, and `is_finding_author` now accepts Grok on this endpoint.
+        # The Grok fixtures in test-reviewer.sh carry no permalink: they passed
+        # the predicate and died here.
+        #
+        # (No apostrophes in this block. The jq program is a single-quoted shell
+        # string, so one ends it — which is how the first draft of this comment
+        # broke the whole script.)
+        #
+        # An unlocated finding is still a finding. `sha: ""` makes it live
+        # rather than stale (see the `stale` rule below), so the failure lands
+        # on the side of reporting something we cannot place instead of
+        # silently reporting nothing.
+        #
+        # Searched only in the part of the body BEFORE the badge.
+        #
+        # When a finding cites a repo rule, Codex appends
+        #   AGENTS.md reference: [AGENTS.md:L327-L335](.../blob/<sha>/AGENTS.md#L327-L335)
+        # which is a blob permalink too. On a body with no code permalink that
+        # citation is the FIRST and only match, so the finding got located in
+        # AGENTS.md and dated by the cited commit — not HEAD, so it came out
+        # STALE and vanished from `status` exactly as being dropped had. Same
+        # wrong answer, another route in.
+        #
+        # Position is the invariant, not the label and not the filename. The
+        # documented shape puts the code permalink AHEAD of the badge and the
+        # citation after the rationale, so cutting at the badge separates them
+        # by construction.
+        #
+        # Keying on the label instead was measured to fail three ways: a capital
+        # `Reference:` (the pattern is case sensitive), a bare `See [...](...)`
+        # with no label at all, and any wording a future template picks. Keying
+        # on the filename fails differently — the cited file is whatever rules
+        # file the repo keeps, and a finding may legitimately be ABOUT AGENTS.md.
+        #
+        # A permalink that appears only after the badge is therefore not read as
+        # a location. That costs nothing that is real and errs toward an
+        # unlocated, live finding, which is the direction that blocks a merge
+        # rather than hiding one.
+        #
+        # (No apostrophes in this block. The jq program is a single-quoted shell
+        # string, so one ends it.)
+        | ($c.body | sub("!\\[P[0-9] Badge\\][\\s\\S]*$"; "")) as $locbody
+        | (($locbody | capture("blob/(?<sha>[0-9a-f]{7,40})/(?<path>[^#\\s]+)#L(?<a>[0-9]+)(-L(?<b>[0-9]+))?"))
+           // { sha: "", path: "(location unknown)", a: "0", b: null }) as $loc
         # The badge headline appears both wrapped in <sub> and bare. Requiring
         # the wrappers produced "(untitled)" and left the whole heading sitting
         # in the rationale.
-        | (($c.body | capture("!\\[P[0-9] Badge\\]\\([^)]*\\)(</sub>)*\\s*(?<t>[^*\\n]+)\\*\\*") | .t | trim) // "(untitled)") as $title
+        #
+        # TWO placements, so two patterns. The badge sits inside the bold run
+        # (`**<sub>BADGE</sub> Title**`) or ahead of it (`BADGE **Title**`), and
+        # one regex cannot read both: against the second shape, `[^*\n]+` cannot
+        # start on the `*` it faces, backtracks onto the single space before it,
+        # and captures that space. The title then trims to EMPTY — not even
+        # "(untitled)", because an empty string is truthy to `//`. The bare shape
+        # is what the grok_p0 and grok_p4 fixtures in test-reviewer.sh look like.
+        #
+        # Bold-first is tried first: on the wrapped shape it simply does not
+        # match, while the wrapped pattern on a bare heading is the case above.
+        # `select(length > 0)` on each is what makes `//` fall through a match
+        # that came back blank.
+        | ((($c.body | capture("!\\[P[0-9] Badge\\]\\([^)]*\\)(</sub>)*\\s*\\*\\*\\s*(?<t>[^*\\n]+)") | .t | trim | select(length > 0))
+            // ($c.body | capture("!\\[P[0-9] Badge\\]\\([^)]*\\)(</sub>)*\\s*(?<t>[^*\\n]+)\\*\\*") | .t | trim | select(length > 0))
+            // "(untitled)")) as $title
         | ($c.body
            | sub("^[\\s\\S]*?!\\[P[0-9] Badge\\]\\([^)]*\\)(</sub>)*[^\\n]*\\n"; "")
            | sub("\\s*<details>[\\s\\S]*$"; "")
@@ -338,9 +407,23 @@ fetch_issue_findings() {
         | . + { fix: (if .fix == .rationale or (.fix | length) < 12 then "" else .fix end) }
         # Bound BEFORE the pipe: inside the startswith pipeline the input is
         # $head, a string, and .reviewed_sha would index into it.
+        # An unlocated finding has no sha to compare, so without a second signal
+        # it is live FOREVER: the author fixes the code, pushes, and `status`
+        # still exits 2 until someone deletes the GitHub comment. The review
+        # comment parser already falls back to the date for exactly this hole
+        # (`created_at < $headdate`); this one was never handed the date.
+        #
+        # The date is a watermark, not proof, which is why it stays a FALLBACK
+        # under the sha: a finding posted after the newest commit date is live, one
+        # posted before a later push goes stale rather than blocking every commit
+        # after it. With no date at all — `wait`, which does not fetch one — the
+        # old always-live reading stands, because calling a finding stale on no
+        # evidence is the direction that hides it.
         | . + { stale: (. as $f
                         | if $f.reviewed_sha != "" and $head != ""
                           then ($head | startswith($f.reviewed_sha)) | not
+                          elif $headdate != ""
+                          then $f.created_at < $headdate
                           else false end) }
       ]'
 }
@@ -349,7 +432,7 @@ fetch_findings() {
   local repo="$1" pr="$2" head_date="$3" head_sha="$4" shamap extra
   shamap="$(review_shas "$repo" "$pr")"
   # Findings that arrived as issue comments, in the same shape.
-  extra="$(fetch_issue_findings "$repo" "$head_sha" "$pr")"
+  extra="$(fetch_issue_findings "$repo" "$head_sha" "$pr" "$head_date")"
   api_all "repos/$repo/pulls/$pr/comments" | jq -r "${JQ_REVIEWER_LIB}[ .[] | select(is_finding_author) ]" \
   | jq --argjson shas "$shamap" --arg head "$head_sha" --arg headdate "$head_date" '
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
@@ -595,8 +678,11 @@ issue_open_in() {
 # with and wants the freshest possible answer to "has anything landed yet".
 # One endpoint, so a failure here cannot take down a wait that the review count
 # could have answered on its own.
+# $4 is the head date, and it may be empty: `wait` deliberately does not fetch one
+# (see cmd_wait), so an unlocated finding stays live there and `wait` errs toward
+# reporting that something landed.
 issue_findings_now() {
-  fetch_issue_findings "$1" "$3" "$2" | jq '[ .[] | select(.stale | not) ] | length'
+  fetch_issue_findings "$1" "$3" "$2" "${4:-}" | jq '[ .[] | select(.stale | not) ] | length'
 }
 
 # Full SHA of the PR's newest commit, for matching against `Reviewed commit`.

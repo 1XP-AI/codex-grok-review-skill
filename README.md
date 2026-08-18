@@ -43,6 +43,36 @@ gh api repos/OWNER/REPO/issues/123/comments \
 That is not hypothetical: it is how this wrapper came to report `CLEAN` on a PR with an
 open P1. Both endpoints have to be read and merged, which is what the wrapper does.
 
+**And do not make the permalink a requirement while you are at it.** Reading both
+endpoints is not enough if the parser then drops what it cannot place. `capture` in jq
+emits *nothing* when it does not match, so `($body | capture("blob/...")) as $loc`
+deletes the whole finding — badge, severity and all — rather than leaving the location
+blank. Measured on the fixtures in `scripts/test-issue-findings.sh`: three badge-carrying
+comments in, one out, and `status` answering `REVIEWED, CLEAN / 0` over an open P0.
+
+The permalink is a Codex habit, not a contract, and `1xp-dorami` is under no obligation
+to copy it. A finding nobody can place is still a finding: report it as
+`(location unknown)` and let it block the merge.
+
+Search for that permalink **only in the part of the body before the badge**, too. When a
+finding cites a repo rule, Codex appends an `AGENTS.md reference:` link, which is a blob
+permalink as well — so on a body with no code permalink it is the first match: the finding
+gets placed in `AGENTS.md`, dated by the cited commit, and — since that is not HEAD —
+reads `STALE` and drops out of the gate exactly as deletion would. Same wrong answer,
+another route in.
+
+Separate them by **position**. The code permalink precedes the badge and the citation
+follows the rationale, so cutting at the badge is structural. Do not key on the label:
+`Reference:` with a capital R, or a bare `See [...](...)`, walks straight past a
+`\breference:` pattern. Do not key on the filename either — the cited file is whatever
+rules file the repo keeps, and a finding may legitimately be *about* `AGENTS.md`.
+
+Then give it the **date** fallback the review-comment parser already has
+(`created_at < headdate`), or it blocks forever — with no sha there is nothing to compare
+against a new head, so the author fixes the code, pushes, and the gate keeps refusing
+until somebody deletes the comment. The sha still wins where there is one; the date is a
+watermark, not proof.
+
 ### 2. Severity is a markdown image badge — easy to strip by accident
 
 Each finding opens with:

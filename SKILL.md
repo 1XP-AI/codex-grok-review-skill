@@ -38,7 +38,11 @@ required reviewer has not vouched · `4` findings all stale.
    (`gh api repos/O/R/issues/N/comments`) — same badge, same severity, but anchored by
    a blob permalink in the body instead of by `path`/`line`. Reading only the review
    endpoint silently drops those; a P1 sat unread on PR #591 that way. The wrapper reads
-   both and normalises them into one list.
+   both and normalises them into one list. The permalink is **optional** — jq's `capture`
+   emits nothing on no match, so requiring it deletes the finding rather than leaving it
+   unplaced. An unlocated finding is reported as `(location unknown)` and still blocks,
+   going stale by date once the head moves past it (with no sha there is nothing else to
+   compare, and it would otherwise block every later commit).
 2. **Severity is a markdown image badge.** Stripping "markdown noise" deletes the
    `P0`–`P4` you need to decide whether to merge — and it fails silently.
 3. **No findings ⇒ no review object with findings — and the verdict lands on either

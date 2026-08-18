@@ -33,3 +33,6 @@ jobs:
 
       - name: reviewer predicate
         run: bash scripts/test-reviewer.sh
+
+      - name: issue-comment finding parser
+        run: bash scripts/test-issue-findings.sh

@@ -34,10 +34,38 @@ composing `gh` calls by hand.
      range `#L12-L14` — keep both ends), and the commit the finding was made against.
      That SHA is what `original_commit_id` is for an inline finding; compare it to the
      PR head to decide staleness.
+   - But it is **optional**, and a parser that requires it is the two-endpoint bug
+     again in miniature. `capture` in jq emits nothing on no match, so binding it with
+     `as` **deletes the finding** instead of leaving the location blank. Fall back to an
+     unlocated finding and let it block the merge. The permalink is a Codex habit; Grok
+     is under no obligation to copy it.
+   - An unlocated finding needs the **date** fallback that rule 4 gives review comments
+     (`created_at < headdate`), or it is live forever: the author fixes the code, pushes,
+     and the gate still refuses until somebody deletes the comment. The sha still wins
+     where there is one — the date is a watermark, not proof.
    - The badge sits **inside** the `**...**` and is wrapped in `<sub>`, sometimes doubled,
      sometimes absent. Anchoring the title regex on the wrappers yields `(untitled)`.
+   - It also appears **ahead of** the bold run — `![P0 Badge](…) **Title**` — and one
+     regex does not read both placements. Against that shape `\s*(?<t>[^*\n]+)\*\*`
+     cannot start on the `*` it faces, backtracks onto the space before it, and captures
+     the space; the title trims to `""`, and an empty string is *truthy* to `//`, so not
+     even `(untitled)` survives. Try bold-first, then wrapped, and reject a blank match
+     from each.
    - A **second** blob permalink may follow, pointing at the AGENTS.md rule the finding
      cites. Take the first match — and do not mistake its `#L327-L335` for the location.
+     "First match" only works once that footer is out of the way, though: on a body with
+     **no** code permalink the citation is the first match, so the finding gets located in
+     AGENTS.md and dated by the cited commit — not HEAD, so it reads STALE and drops out
+     of the gate exactly as being deleted would.
+   - Separate them by **position, not by label or filename**: search only the part of the
+     body *before the badge*. The code permalink precedes the badge and the citation
+     follows the rationale, so the cut is structural. Keying on the `reference:` label was
+     measured to fail three ways — a capital `Reference:`, a bare `See [...](...)` with no
+     label, and any wording a future template picks. Keying on the filename fails
+     differently: the cited file is whatever rules file the repo keeps, and a finding may
+     legitimately be *about* `AGENTS.md`. The cost is that a code permalink appearing only
+     after the badge is not read as a location either — which leaves an unlocated, live
+     finding, the direction that blocks a merge rather than hiding one.
 
 2. **Never strip markdown from a finding before reading its severity.** The
    `P0`–`P4` level is a badge image at the start of the body:
