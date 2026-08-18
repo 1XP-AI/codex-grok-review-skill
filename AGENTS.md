@@ -1,6 +1,6 @@
-# Codex review on GitHub PRs — agent instructions
+# Codex / Grok review on GitHub PRs — agent instructions
 
-Tool-agnostic rules for reading Codex code-review findings and driving the
+Tool-agnostic rules for reading Codex and Grok code-review findings and driving the
 `@codex review` loop. Paste into your repo's `AGENTS.md`, or point your agent here.
 
 Companion wrapper: `scripts/codex-review.sh` (needs `gh` + `jq`). Use it instead of
@@ -40,7 +40,7 @@ composing `gh` calls by hand.
      cites. Take the first match — and do not mistake its `#L327-L335` for the location.
 
 2. **Never strip markdown from a finding before reading its severity.** The
-   `P1`/`P2`/`P3` level is a badge image at the start of the body:
+   `P0`–`P4` level is a badge image at the start of the body:
    `![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)`.
    Regex-cleaning "noise" deletes the field your merge decision depends on, and it
    fails silently.
@@ -50,6 +50,7 @@ composing `gh` calls by hand.
 
    ```
    Codex Review: Didn't find any major issues. Breezy!
+   Grok Review: Didn't find any major issues. 🚀
    **Reviewed commit:** `d94a859dde`
    ```
 
@@ -107,13 +108,19 @@ status → not reviewed?  → request → wait → status
        → clean?         → merge per your policy
 ```
 
+11. **Two authors, one reader.** Codex posts as `chatgpt-codex-connector[bot]`.
+    Grok posts as `1xp-dorami`. Only accept a 1xp-dorami comment when the body has
+    `![P0 Badge]`–`![P4 Badge]` or `Didn't find any major issues` — a chat note from
+    that login is not a finding. An open badge from either author makes `status`
+    exit `2`; a Codex CLEAN must not cover a Grok P2. Keep `@codex review` as-is.
+
 ## Verifying claims about this behaviour
 
 These rules were measured, not remembered. If you change one, include the command and
 its output. Useful probes:
 
 ```bash
-gh api repos/O/R/pulls/N/comments  -q '[.[] | select(.user.login|startswith("chatgpt-codex-connector"))] | length'
+gh api repos/O/R/pulls/N/comments  -q '[.[] | select((.user.login|startswith("chatgpt-codex-connector")) or (.user.login=="1xp-dorami" and (.body|test("!\\[P[0-9] Badge\\]"))))] | length'
 gh api repos/O/R/pulls/N/reviews   -q 'length'
 gh api repos/O/R/issues/N/reactions -q '[.[] | "\(.user.login):\(.content)"]'
 gh api repos/O/R/pulls/N/commits   -q 'map(.commit.committer.date) | max'

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# codex-review — read Codex PR review findings correctly, and request re-reviews.
+# codex-review — read Codex and Grok PR review findings correctly, and request re-reviews.
 #
 # Why this exists: the obvious `gh` invocations silently omit Codex findings or
 # throw away their severity. See README.md for the measured behaviour.
@@ -8,7 +8,26 @@
 
 set -euo pipefail
 
-BOT="chatgpt-codex-connector"
+# Codex still posts as chatgpt-codex-connector[bot] (login startswith this).
+# Grok reviews post as 1xp-dorami. Only comments that look like a review count —
+# a P-badge or the clean-verdict phrase. Random 1xp-dorami chatter is ignored.
+CODEX_LOGIN="chatgpt-codex-connector"
+GROK_LOGIN="1xp-dorami"
+
+# jq library spliced into every comment/review filter.
+# is_reviewer       — Codex login, or Grok login with a review-shaped body
+# is_finding_author — Codex login, or Grok login with a P-badge (clean != finding)
+JQ_REVIEWER_LIB='
+def is_codex: startswith("chatgpt-codex-connector");
+def is_grok: . == "1xp-dorami";
+def is_review_body: test("!\\[P[0-9] Badge\\]") or test("[Dd]idn.t find any major issues");
+def is_reviewer:
+  (.user.login | is_codex)
+  or ((.user.login | is_grok) and (.body // "" | is_review_body));
+def is_finding_author:
+  (.user.login | is_codex)
+  or ((.user.login | is_grok) and (.body // "" | test("!\\[P[0-9] Badge\\]")));
+'
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
@@ -52,7 +71,7 @@ command -v jq >/dev/null || die "jq not found"
 
 usage() {
   cat <<'EOF'
-codex-review — read Codex PR review findings, and request re-reviews.
+codex-review — read Codex and Grok PR review findings, and request re-reviews.
 
 USAGE
   codex-review status <pr>     One-line verdict: has Codex reviewed? any open findings?
@@ -129,15 +148,15 @@ head_commit_date() {
 #   **Reviewed commit:** `<sha10>`
 # which is far better than guessing from timestamps.
 review_shas() {
-  api_all "repos/$1/pulls/$2/reviews" | jq -r "[ .[]
-          | select(.user.login | startswith(\"$BOT\"))
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[ .[]
+          | select(is_reviewer)
           | { key: (.id | tostring),
               value: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
         ] | from_entries"
 }
 
 # All inline review comments authored by the Codex bot, enriched:
-#   severity     P1|P2|P3|—   (from the badge image alt text)
+#   severity     P0|P1|P2|P3|P4|—   (from the badge image alt text)
 #   title        the bolded finding headline
 #   rationale    the prose, minus the headline and the "Useful?" footer
 #   fix          the prescriptive clause Codex closes with (heuristic)
@@ -159,7 +178,7 @@ review_shas() {
 fetch_issue_findings() {
   local repo="$1" head_sha="$2"
   api_all "repos/$repo/issues/$3/comments" \
-  | jq --arg head "$head_sha" --arg bot "$BOT" '
+  | jq --arg head "$head_sha" "${JQ_REVIEWER_LIB}"'
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
       def _hv: {"0":0,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,
                 "a":10,"b":11,"c":12,"d":13,"e":14,"f":15}[ascii_downcase];
@@ -193,7 +212,7 @@ fetch_issue_findings() {
         | (if test("; ") then (split("; ") | last) else . end)
         | trim;
       [ .[]
-        | select(.user.login | startswith($bot))
+        | select(is_finding_author)
         | select(.body | test("!\\[P[0-9] Badge\\]"))
         | . as $c
         # Ranged permalinks exist (#L12-L14). Both ends are kept: reporting only
@@ -247,7 +266,7 @@ fetch_findings() {
   shamap="$(review_shas "$repo" "$pr")"
   # Findings that arrived as issue comments, in the same shape.
   extra="$(fetch_issue_findings "$repo" "$head_sha" "$pr")"
-  api_all "repos/$repo/pulls/$pr/comments" | jq -r "[ .[] | select(.user.login | startswith(\"$BOT\")) ]" \
+  api_all "repos/$repo/pulls/$pr/comments" | jq -r "${JQ_REVIEWER_LIB}[ .[] | select(is_finding_author) ]" \
   | jq --argjson shas "$shamap" --arg head "$head_sha" --arg headdate "$head_date" '
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
       # Codex states what to do in its FINAL SENTENCE, and when that sentence also
@@ -329,21 +348,22 @@ fetch_findings() {
 # Codex leaves NO review object when it has nothing to say — it reacts 👍 on the
 # PR instead. So "zero reviews" is ambiguous unless you also check reactions.
 has_thumbsup() {
-  api_all "repos/$1/issues/$2/reactions" | jq -r "[.[] | select((.user.login | startswith(\"$BOT\")) and .content == \"+1\")] | length" \
+  api_all "repos/$1/issues/$2/reactions" | jq -r "[.[] | select((.user.login | startswith(\"$CODEX_LOGIN\")) and .content == \"+1\")] | length" \
     2>/dev/null || echo 0
 }
 
 # A clean review ALSO lands as an issue comment carrying the commit it inspected:
 #
 #   Codex Review: Didn't find any major issues. Breezy!
+#   Grok Review: Didn't find any major issues. 🚀
 #   **Reviewed commit:** `d94a859dde`
 #
 # The sign-off wanders ("Bravo.", "Breezy!", "Keep them coming!", …), so never match
 # on it. The `Reviewed commit` hash is the valuable part: unlike a 👍 reaction, it
 # proves WHICH commit was reviewed. Emits "<iso8601>\t<sha>" per clean verdict.
 clean_verdicts() {
-  api_all "repos/$1/issues/$2/comments" | jq -r "[ .[]
-          | select(.user.login | startswith(\"$BOT\"))
+  api_all "repos/$1/issues/$2/comments" | jq -r "${JQ_REVIEWER_LIB}[ .[]
+          | select(is_reviewer)
           | select(.body | test(\"[Dd]idn't find any major issues\"))
           | { created_at, sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
         ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\"" 2>/dev/null || true
@@ -426,7 +446,7 @@ head_commit_sha() {
 }
 
 review_count() {
-  api_all "repos/$1/pulls/$2/reviews" | jq -r "[.[] | select(.user.login | startswith(\"$BOT\"))] | length" 2>/dev/null || echo 0
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[.[] | select(is_reviewer)] | length" 2>/dev/null || echo 0
 }
 
 # The fingerprint `wait` settles on: everything Codex has posted, both ways.
@@ -441,19 +461,19 @@ activity_stamp() {
   printf '%s|%s' \
     "$(latest_review_date "$1" "$2")" \
     "$(api_all "repos/$1/issues/$2/comments" \
-       | jq -r --arg bot "$BOT" '
+       | jq -r "${JQ_REVIEWER_LIB}"'
            [ .[]
-             | select(.user.login | startswith($bot))
+             | select(is_reviewer)
              | select(.body | test("!\\[P[0-9] Badge\\]") or test("major issues"))
              | .created_at ]
            | "\(length):\(max // "")"' 2>/dev/null)"
 }
 
 latest_review_date() {
-  api_all "repos/$1/pulls/$2/reviews" | jq -r "[.[] | select(.user.login | startswith(\"$BOT\")) | .submitted_at] | max // \"\"" 2>/dev/null
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[.[] | select(is_reviewer) | .submitted_at] | max // \"\"" 2>/dev/null
 }
 
-sev_rank() { case "$1" in P1) echo 1;; P2) echo 2;; P3) echo 3;; *) echo 9;; esac; }
+sev_rank() { case "$1" in P0) echo 0;; P1) echo 1;; P2) echo 2;; P3) echo 3;; P4) echo 4;; *) echo 9;; esac; }
 
 cmd_json() {
   local repo pr head head_sha

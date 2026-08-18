@@ -1,6 +1,6 @@
 # codex-review-skill
 
-Read **Codex** code-review findings on GitHub pull requests correctly, and drive the
+Read **Codex** and **Grok** code-review findings on GitHub pull requests correctly, and drive the
 `@codex review` re-review loop — from Claude Code, Codex CLI, or any coding agent.
 
 The obvious `gh` commands **silently omit findings or throw away their severity**.
@@ -70,6 +70,18 @@ Codex Review: Didn't find any major issues. Breezy!
 
 **Reviewed commit:** `d94a859dde`
 ```
+
+Grok uses the same two fixed fields, as an issue comment, posted as `1xp-dorami`:
+
+```
+Grok Review: Didn't find any major issues. 🚀
+
+**Reviewed commit:** `d94a859dde`
+```
+
+A random `1xp-dorami` comment is **not** a review. Require `![P0 Badge]`–`![P4 Badge]`
+or `Didn't find any major issues`. An open badge from either author makes `status`
+exit `2` — a Codex CLEAN does not cover a Grok P2.
 
 So **"zero reviews" is ambiguous** — it means either *not reviewed yet* or *reviewed
 and clean*. Miss this and you either wait forever for a review that will never come,
@@ -370,5 +382,6 @@ Codex reviews a PR when you:
 ## Contributing
 
 Behaviour here is measured, not assumed. If you change a documented claim, include
-the command you ran and its output. Bot login is matched by the `chatgpt-codex-connector`
-prefix; override with the `BOT` variable in the script if your installation differs.
+the command you ran and its output. Reviewer logins: `chatgpt-codex-connector*` (Codex)
+and `1xp-dorami` (Grok, only when the body looks like a review). `@codex review` /
+`wait` / `request` stay Codex-only. Severity badges are `P0`–`P4`.
