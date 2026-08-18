@@ -32,7 +32,8 @@ t() {
   fi
 }
 
-t 'clean verdict names head'      '0 0 1 0 "x" 1 abc 0' clean-head   0
+t 'both authors clean on head'    '0 0 1 0 "x" 1 abc 0 1' clean-head   0
+t 'only one author clean on head' '0 0 1 0 "x" 1 abc 0 0' partial-clean 3
 t 'no review, no thumbs, nothing' '0 0 0 0 "" 0 "" 0'   not-reviewed 3
 t 'clean verdict names an older'  '0 3 1 0 "x" 0 abc 0' stale-clean  3
 t 'reviewed, all findings stale'  '0 3 1 0 "" 0 "" 0'   all-stale    4
@@ -52,7 +53,7 @@ t 'stale issue finding, no review' '0 1 0 0 "" 0 "" 0'   all-stale    4
 t 'live issue finding, empty list'  '0 0 0 0 "" 0 "" 1'   inconsistent 3
 # open beats a clean verdict: a later review can file against the same commit an
 # earlier one blessed.
-t 'open outranks a head-clean'    '2 5 1 0 "x" 1 abc 0' open         2
+t 'open outranks a head-clean'    '2 5 1 0 "x" 1 abc 0 1' open         2
 # Mixed Codex+Grok thread: a clean verdict naming HEAD must not cover an
 # open Grok finding. Either author's open badge makes status 2, not 0.
 t 'mixed Codex clean + Grok P2'   '1 1 1 0 "x" 1 abc 1' open         2

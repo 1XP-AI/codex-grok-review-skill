@@ -155,7 +155,7 @@ head_commit_date() {
 # which is far better than guessing from timestamps.
 review_shas() {
   api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[ .[]
-          | select(is_reviewer)
+          | select(.user.login | is_codex)
           | { key: (.id | tostring),
               value: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
         ] | from_entries"
@@ -367,12 +367,29 @@ has_thumbsup() {
 # The sign-off wanders ("Bravo.", "Breezy!", "Keep them coming!", …), so never match
 # on it. The `Reviewed commit` hash is the valuable part: unlike a 👍 reaction, it
 # proves WHICH commit was reviewed. Emits "<iso8601>\t<sha>" per clean verdict.
+# $3 = all|codex|grok (default all). wait stays Codex-only; status needs both.
 clean_verdicts() {
-  api_all "repos/$1/issues/$2/comments" | jq -r "${JQ_REVIEWER_LIB}[ .[]
+  local who="${3:-all}"
+  api_all "repos/$1/issues/$2/comments" | jq -r --arg who "$who" "${JQ_REVIEWER_LIB}[ .[]
           | select(is_reviewer)
           | select(.body | test(\"[Dd]idn't find any major issues\"))
-          | { created_at, sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
-        ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\"" 2>/dev/null || true
+          | select(
+              if $who == \"codex\" then (.user.login | is_codex)
+              elif $who == \"grok\" then (.user.login | is_grok)
+              else true end)
+          | { created_at, sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\"), who: (if (.user.login | is_codex) then \"codex\" else \"grok\" end) }
+        ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\t\(.who)\"" 2>/dev/null || true
+}
+
+# Latest clean SHA for one author ($4) that prefixes $3 (the head).
+clean_sha_for() {
+  local line sha
+  line="$(clean_verdicts "$1" "$2" "$4" | tail -n 1)"
+  sha="$(printf '%s' "$line" | cut -f2)"
+  if [ -n "$sha" ] && [ -n "$3" ]; then
+    case "$3" in "$sha"*) printf '%s' "$sha"; return 0 ;; esac
+  fi
+  return 1
 }
 
 # Has any Codex review stated THIS head commit as the one it reviewed?
@@ -498,10 +515,12 @@ cmd_json() {
 # Echoes a key; returns the exit code that goes with it.
 verdict_key() {
   local open="$1" total="$2" reviews="$3" thumbs="$4" clean_line="$5" \
-        clean_matches_head="$6" clean_sha="$7" issue_open="$8"
+        clean_matches_head="$6" clean_sha="$7" issue_open="$8" \
+        both_clean="${9:-0}"
 
-  # A clean verdict naming the newest commit is the strongest possible signal.
-  if [ "$open" -eq 0 ] && [ "$clean_matches_head" -eq 1 ]; then
+  # Status 0 only when BOTH authors posted a clean verdict naming HEAD.
+  # wait/request stay Codex-only and do not use this function.
+  if [ "$open" -eq 0 ] && [ "$both_clean" -eq 1 ]; then
     echo clean-head; return 0
   fi
 
@@ -527,6 +546,9 @@ verdict_key() {
     # that ever stop being true, this reports uncertainty rather than the CLEAN it
     # used to fall through to with a P1 sitting on the PR.
     if [ "${issue_open:-0}" -gt 0 ]; then echo inconsistent; return 3; fi
+    if [ "$clean_matches_head" -eq 1 ]; then
+      echo partial-clean; return 3
+    fi
     echo clean; return 0
   fi
 
@@ -582,8 +604,13 @@ verdict_for() {
     case "$head_sha" in "$clean_sha"*) matches=1 ;; esac
   fi
 
+  local both=0
+  if clean_sha_for "$repo" "$pr" "$head_sha" codex >/dev/null \
+     && clean_sha_for "$repo" "$pr" "$head_sha" grok >/dev/null; then
+    both=1
+  fi
   verdict_key "$open" "$total" "$reviews" "$thumbs" "$clean_line" "$matches" \
-    "$clean_sha" "$(issue_open_in "$json")"
+    "$clean_sha" "$(issue_open_in "$json")" "$both"
 }
 
 print_findings() {
@@ -737,8 +764,13 @@ cmd_status() {
   # The decision itself lives in verdict_key. Everything below renders it.
   local key code total
   code=0
+  local both=0
+  if clean_sha_for "$repo" "$pr" "$head_sha" codex >/dev/null \
+     && clean_sha_for "$repo" "$pr" "$head_sha" grok >/dev/null; then
+    both=1
+  fi
   key="$(verdict_key "$open" "$(printf '%s' "$json" | jq 'length')" "$reviews" "$thumbs" \
-        "$clean_line" "$clean_matches_head" "$clean_sha" "${issue_open:-0}")" || code=$?
+        "$clean_line" "$clean_matches_head" "$clean_sha" "${issue_open:-0}" "$both")" || code=$?
   total="$(printf '%s' "$json" | jq 'length')"
 
   case "$key" in
@@ -755,6 +787,9 @@ cmd_status() {
       echo "                  Confirm they are addressed, then merge." ;;
     clean)
       echo "  VERDICT       : REVIEWED, CLEAN." ;;
+    partial-clean)
+      echo "  VERDICT       : PARTIAL CLEAN — both Codex and Grok must name the newest commit."
+      echo "                  Missing author is still unreviewed." ;;
     inconsistent)
       echo "  VERDICT       : INCONSISTENT — an issue-comment finding is live but the"
       echo "                  finding list is empty. Re-run; do not read this as clean." ;;
@@ -820,7 +855,7 @@ cmd_wait() {
   echo "Waiting for a Codex verdict on ${head_sha:0:10} (timeout ${deadline}s)..."
   while [ "$elapsed" -lt "$deadline" ]; do
     # Strongest signal: a clean verdict naming this exact commit.
-    clean_sha="$(clean_verdicts "$repo" "$pr" | tail -n 1 | cut -f2)"
+    clean_sha="$(clean_verdicts "$repo" "$pr" codex | tail -n 1 | cut -f2)"
     if [ -n "$clean_sha" ] && [ -n "$head_sha" ] \
        && case "$head_sha" in "$clean_sha"*) true ;; *) false ;; esac; then
       echo "Clean verdict for ${clean_sha}."

@@ -81,7 +81,8 @@ Grok Review: Didn't find any major issues. 🚀
 
 A random `1xp-dorami` comment is **not** a review. Require `![P0 Badge]`–`![P4 Badge]`
 or `Didn't find any major issues`. An open badge from either author makes `status`
-exit `2` — a Codex CLEAN does not cover a Grok P2.
+exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` only when
+**both** authors posted a clean verdict naming HEAD. `wait` / `request` stay Codex-only.
 
 So **"zero reviews" is ambiguous** — it means either *not reviewed yet* or *reviewed
 and clean*. Miss this and you either wait forever for a review that will never come,
