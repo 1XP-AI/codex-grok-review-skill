@@ -196,7 +196,18 @@ reject() {
 reject 'comma form is one token, not two' 'codex,grok' 'unknown reviewer'
 reject 'an unknown name'                  'bogus'      'unknown reviewer'
 reject 'either cannot be combined'        'either grok' 'cannot be combined'
-reject 'empty names nobody'               ''           'is empty'
+reject 'empty names nobody'               ''            'names no reviewer'
+# Set-but-blank was the dangerous one: it matched neither `either|any` nor '',
+# so the validation loop ran zero times and passed, missing_reviewers ran the
+# same empty loop and reported nothing missing, and any author's HEAD-clean
+# became clean-head/0 — the no-policy behaviour this variable exists to stop.
+reject 'spaces only'                      '   '         'names no reviewer'
+reject 'a tab only'                       "$(printf '\t')" 'names no reviewer'
+# Normalising to tokens also makes padding mean what it looks like.
+got="$(REQUIRED_REVIEWERS=' either ' bash "$src" -h 2>&1 >/dev/null | grep -c REQUIRED_REVIEWERS || true)"
+check 'padded either is still either' "$got" '0'
+got="$(REQUIRED_REVIEWERS='codex   grok' bash "$src" -h 2>&1 >/dev/null | grep -c REQUIRED_REVIEWERS || true)"
+check 'repeated spaces are one separator' "$got" '0'
 # `either` itself must get PAST validation — it may still fail later for want of a
 # real repo, but never with a REQUIRED_REVIEWERS complaint.
 got="$(REQUIRED_REVIEWERS='either' bash "$src" -h 2>&1 >/dev/null | grep -c REQUIRED_REVIEWERS || true)"

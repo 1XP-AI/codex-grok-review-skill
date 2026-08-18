@@ -77,9 +77,26 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 # they are cosmetic, but this one decides whether a PR is callable clean, and
 # `REQUIRED_REVIEWERS=` silently becoming `codex` is a policy nobody chose.
 REQUIRED_REVIEWERS="${REQUIRED_REVIEWERS-codex}"
+
+# Normalise to the tokens the shell actually sees before judging them.
+#
+# A set-but-blank value — spaces, a tab — is the dangerous case. It matches
+# neither `either|any` nor `''`, so it used to reach the validation loop, which
+# then iterated ZERO times and passed. `missing_reviewers` ran the same empty
+# loop and reported nothing missing, so a blank string read as a satisfied
+# policy: any author's HEAD-clean became clean-head/0, which is precisely the
+# no-policy behaviour this variable exists to prevent. Counting tokens rather
+# than comparing strings catches "", "   ", and "\t" with one rule, and it also
+# lets " either " and "codex  grok" mean what they look like.
+_req=""
+for _r in $REQUIRED_REVIEWERS; do _req="${_req:+$_req }$_r"; done
+REQUIRED_REVIEWERS="$_req"
+unset _req
+[ -n "$REQUIRED_REVIEWERS" ] \
+  || die "REQUIRED_REVIEWERS names no reviewer — set 'codex', 'grok', 'codex grok', or 'either'"
+
 case "$REQUIRED_REVIEWERS" in
   either|any) ;;
-  '') die "REQUIRED_REVIEWERS is empty — name at least one reviewer, or use 'either'" ;;
   *)
     for _r in $REQUIRED_REVIEWERS; do
       case "$_r" in
@@ -467,6 +484,17 @@ reviewer_vouched() {
 #
 # Pure text over a clean_verdicts snapshot already in hand ($1) — no API call, so
 # it cannot disagree with the verdict line rendered beside it.
+# Did ANY author clear commit $2, whatever the policy says about it?
+#
+# Separates the two ways a policy can be unmet, which need opposite advice: some
+# reviewer cleared HEAD and we are waiting on another (partial-clean), or nobody
+# did and the newest code is genuinely unreviewed (stale-clean → request one).
+# The globally-latest verdict cannot tell them apart — it is whoever spoke last,
+# which on a dual-bot PR is routinely the one naming an older commit.
+head_clean_exists() {
+  reviewer_vouched "$1" "$2" codex || reviewer_vouched "$1" "$2" grok
+}
+
 missing_reviewers() {
   local clean="$1" head="$2" who out=""
   case "$REQUIRED_REVIEWERS" in
@@ -617,21 +645,24 @@ cmd_json() {
 # Echoes a key; returns the exit code that goes with it.
 verdict_key() {
   local open="$1" total="$2" reviews="$3" thumbs="$4" clean_line="$5" \
-        clean_matches_head="$6" clean_sha="$7" issue_open="$8" \
-        missing_required="${9:-0}"
+        head_clean_exists="$6" clean_sha="$7" issue_open="$8" \
+        missing_required="${9:-1}"
 
-  # A clean verdict naming the newest commit is still the strongest signal — but
-  # WHOSE clean verdict decides whether it is enough. Every REQUIRED_REVIEWERS
-  # entry has to have named this commit; a Grok clean does not answer for a Codex
-  # that never ran. An open badge from either author outranks both (open==0 is
-  # required to get here). wait/request stay Codex-only and do not use this.
+  # THE clean test, and it asks the policy — not the newest verdict on the PR.
   #
-  # Only this branch is gated. Below it nothing consults missing_required, so the
-  # 👍 path — a review with no clean comment at all — keeps reporting `clean`
-  # exactly as before; a reaction carries no commit for anyone to be missing from.
-  if [ "$open" -eq 0 ] && [ "$clean_matches_head" -eq 1 ]; then
-    if [ "$missing_required" -eq 0 ]; then echo clean-head; return 0; fi
-    echo partial-clean; return 3
+  # `clean_matches_head` is derived from the LAST LINE of the all-author verdict
+  # list, so it answers "did whoever spoke most recently name HEAD". That is the
+  # wrong question the moment two bots are involved: Codex clears HEAD, Grok then
+  # posts a late clean for an older commit, and the global-latest SHA goes stale
+  # while the policy is fully satisfied. Gating on it returned stale-clean/3 and
+  # blocked a PR that `REQUIRED_REVIEWERS=codex` had already accepted — the exact
+  # delayed-second-reviewer race a dual-bot reader exists to survive.
+  #
+  # missing_required is per author and already asks each one's own latest verdict,
+  # so it is the authority. It defaults to 1: an unknown policy state must never
+  # be read as clean.
+  if [ "$open" -eq 0 ] && [ "$missing_required" -eq 0 ]; then
+    echo clean-head; return 0
   fi
 
   # `total`, not just `issue_open`. An issue-comment finding leaves no review
@@ -646,7 +677,14 @@ verdict_key() {
   fi
 
   if [ "$open" -eq 0 ]; then
-    if [ -n "$clean_sha" ] && [ "$clean_matches_head" -eq 0 ]; then
+    # Reached only with the policy unmet, so both of these say "not clear yet" and
+    # differ in what to do about it. Someone HAS cleared HEAD, just not everyone
+    # required → wait for the other reviewer. Nobody has → the newest code is
+    # unreviewed and needs a re-review requested.
+    if [ "$head_clean_exists" -eq 1 ]; then
+      echo partial-clean; return 3
+    fi
+    if [ -n "$clean_sha" ]; then
       echo stale-clean; return 3
     fi
     if [ "$total" -gt 0 ]; then echo all-stale; return 4; fi
@@ -706,10 +744,9 @@ verdict_for() {
   clean="$(clean_verdicts "$repo" "$pr")"
   clean_line="$(printf '%s' "$clean" | tail -n 1)"
   clean_sha="$(printf '%s' "$clean_line" | cut -f2)"
+  # Not "did the newest verdict name HEAD" — "did anyone". See head_clean_exists.
   matches=0
-  if [ -n "$clean_sha" ] && [ -n "$head_sha" ]; then
-    case "$head_sha" in "$clean_sha"*) matches=1 ;; esac
-  fi
+  if head_clean_exists "$clean" "$head_sha"; then matches=1; fi
   # Counted off the snapshot already fetched, never re-read — see missing_reviewers.
   missing="$(missing_reviewers "$clean" "$head_sha")"
 
@@ -848,9 +885,7 @@ cmd_status() {
   clean_at="$(printf '%s' "$clean_line" | cut -f1)"
   clean_sha="$(printf '%s' "$clean_line" | cut -f2)"
   clean_matches_head=0
-  if [ -n "$clean_sha" ] && [ -n "$head_sha" ] && case "$head_sha" in "$clean_sha"*) true ;; *) false ;; esac; then
-    clean_matches_head=1
-  fi
+  if head_clean_exists "$clean" "$head_sha"; then clean_matches_head=1; fi
   # Same snapshot as the verdict line above, so the two cannot disagree.
   missing="$(missing_reviewers "$clean" "$head_sha")"
 
