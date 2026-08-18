@@ -134,5 +134,40 @@ check 'wrong author is not a finding'        "$(q '[.[] | select(.id == 7)] | le
 # Both permalink-less findings land here. Before the fallback this was 3.
 check 'live findings counted'                "$(q '[.[] | select(.stale == false and .anchored == true)] | length')" '5'
 
+# --- staleness by date, when there is no sha to compare ---------------------
+#
+# `sha: ""` is what keeps an unlocated finding alive, and with no second signal
+# it stays alive FOREVER: the author fixes the code, pushes, and `status` still
+# exits 2 until someone deletes the comment. The review-comment parser already
+# falls back to `created_at < $headdate`; this one was never handed the date.
+#
+# The sha still wins where there is one — the date is a watermark, not proof.
+d() { printf '%s' "$1" | jq -r "first(.[] | select(.id == $2)) | $3"; }
+
+MID="$(fetch_issue_findings "O/R" "$HEAD_SHA" 1 '2026-08-18T00:05:00Z')"
+check 'unlocated, posted before head, stale' "$(d "$MID" 3 '.stale')" 'true'
+check 'unlocated, posted before head, stale' "$(d "$MID" 4 '.stale')" 'true'
+check 'unlocated, posted after head, live'   "$(d "$MID" 9 '.stale')" 'false'
+# The whole point: the merge gate lets go once the work moves on.
+# Live drops from 5 to 3: the two unlocated findings that predate the newest
+# commit let go, while id 9 (posted after it) and the two sha-matched ones hold.
+check 'stale unlocated stops blocking'       "$(printf '%s' "$MID" | jq '[.[] | select(.stale == false and .anchored == true)] | length')" '3'
+
+LATER="$(fetch_issue_findings "O/R" "$HEAD_SHA" 1 '2026-08-18T00:30:00Z')"
+# Selected on the empty sha, not on the source: every finding here is source
+# "issue", so that predicate would also count the one already stale by hash.
+check 'every unlocated goes stale eventually' "$(printf '%s' "$LATER" | jq '[.[] | select(.reviewed_sha == "" and .stale)] | length')" '3'
+# A sha that names HEAD outranks any date — the finding IS about this commit.
+check 'sha naming head beats a later date'   "$(d "$LATER" 1 '.stale')" 'false'
+
+EARLY="$(fetch_issue_findings "O/R" "$HEAD_SHA" 1 '2026-08-18T00:00:00Z')"
+check 'unlocated newer than head is live'    "$(d "$EARLY" 3 '.stale')" 'false'
+# And a sha that names an older commit stays stale however early the watermark.
+check 'sha naming an older beats the date'   "$(d "$EARLY" 2 '.stale')" 'true'
+
+# No date at all is `wait`, which does not fetch one. Calling a finding stale on
+# no evidence hides it, so the always-live reading stands there.
+check 'no date keeps unlocated live'         "$(by 3 '.stale')" 'false'
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -37,8 +37,12 @@ composing `gh` calls by hand.
    - But it is **optional**, and a parser that requires it is the two-endpoint bug
      again in miniature. `capture` in jq emits nothing on no match, so binding it with
      `as` **deletes the finding** instead of leaving the location blank. Fall back to an
-     unlocated, non-stale finding and let it block the merge. The permalink is a Codex
-     habit; Grok is under no obligation to copy it.
+     unlocated finding and let it block the merge. The permalink is a Codex habit; Grok
+     is under no obligation to copy it.
+   - An unlocated finding needs the **date** fallback that rule 4 gives review comments
+     (`created_at < headdate`), or it is live forever: the author fixes the code, pushes,
+     and the gate still refuses until somebody deletes the comment. The sha still wins
+     where there is one — the date is a watermark, not proof.
    - The badge sits **inside** the `**...**` and is wrapped in `<sub>`, sometimes doubled,
      sometimes absent. Anchoring the title regex on the wrappers yields `(untitled)`.
    - It also appears **ahead of** the bold run — `![P0 Badge](…) **Title**` — and one

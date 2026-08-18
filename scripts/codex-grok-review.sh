@@ -260,9 +260,10 @@ review_shas() {
 # The permalink carries MORE than the review-comment form: the commit, the path
 # and the line are all in the URL, so staleness here is exact rather than dated.
 fetch_issue_findings() {
-  local repo="$1" head_sha="$2"
+  # $4 (head_date) is optional. `wait` has no date to give — see issue_findings_now.
+  local repo="$1" head_sha="$2" head_date="${4:-}"
   api_all "repos/$repo/issues/$3/comments" \
-  | jq --arg head "$head_sha" "${JQ_REVIEWER_LIB}"'
+  | jq --arg head "$head_sha" --arg headdate "$head_date" "${JQ_REVIEWER_LIB}"'
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
       def _hv: {"0":0,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,
                 "a":10,"b":11,"c":12,"d":13,"e":14,"f":15}[ascii_downcase];
@@ -376,9 +377,23 @@ fetch_issue_findings() {
         | . + { fix: (if .fix == .rationale or (.fix | length) < 12 then "" else .fix end) }
         # Bound BEFORE the pipe: inside the startswith pipeline the input is
         # $head, a string, and .reviewed_sha would index into it.
+        # An unlocated finding has no sha to compare, so without a second signal
+        # it is live FOREVER: the author fixes the code, pushes, and `status`
+        # still exits 2 until someone deletes the GitHub comment. The review
+        # comment parser already falls back to the date for exactly this hole
+        # (`created_at < $headdate`); this one was never handed the date.
+        #
+        # The date is a watermark, not proof, which is why it stays a FALLBACK
+        # under the sha: a finding posted after the newest commit date is live, one
+        # posted before a later push goes stale rather than blocking every commit
+        # after it. With no date at all — `wait`, which does not fetch one — the
+        # old always-live reading stands, because calling a finding stale on no
+        # evidence is the direction that hides it.
         | . + { stale: (. as $f
                         | if $f.reviewed_sha != "" and $head != ""
                           then ($head | startswith($f.reviewed_sha)) | not
+                          elif $headdate != ""
+                          then $f.created_at < $headdate
                           else false end) }
       ]'
 }
@@ -387,7 +402,7 @@ fetch_findings() {
   local repo="$1" pr="$2" head_date="$3" head_sha="$4" shamap extra
   shamap="$(review_shas "$repo" "$pr")"
   # Findings that arrived as issue comments, in the same shape.
-  extra="$(fetch_issue_findings "$repo" "$head_sha" "$pr")"
+  extra="$(fetch_issue_findings "$repo" "$head_sha" "$pr" "$head_date")"
   api_all "repos/$repo/pulls/$pr/comments" | jq -r "${JQ_REVIEWER_LIB}[ .[] | select(is_finding_author) ]" \
   | jq --argjson shas "$shamap" --arg head "$head_sha" --arg headdate "$head_date" '
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
@@ -633,8 +648,11 @@ issue_open_in() {
 # with and wants the freshest possible answer to "has anything landed yet".
 # One endpoint, so a failure here cannot take down a wait that the review count
 # could have answered on its own.
+# $4 is the head date, and it may be empty: `wait` deliberately does not fetch one
+# (see cmd_wait), so an unlocated finding stays live there and `wait` errs toward
+# reporting that something landed.
 issue_findings_now() {
-  fetch_issue_findings "$1" "$3" "$2" | jq '[ .[] | select(.stale | not) ] | length'
+  fetch_issue_findings "$1" "$3" "$2" "${4:-}" | jq '[ .[] | select(.stale | not) ] | length'
 }
 
 # Full SHA of the PR's newest commit, for matching against `Reviewed commit`.

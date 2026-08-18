@@ -54,6 +54,12 @@ The permalink is a Codex habit, not a contract, and `1xp-dorami` is under no obl
 to copy it. A finding nobody can place is still a finding: report it as
 `(location unknown)` and let it block the merge.
 
+Then give it the **date** fallback the review-comment parser already has
+(`created_at < headdate`), or it blocks forever — with no sha there is nothing to compare
+against a new head, so the author fixes the code, pushes, and the gate keeps refusing
+until somebody deletes the comment. The sha still wins where there is one; the date is a
+watermark, not proof.
+
 ### 2. Severity is a markdown image badge — easy to strip by accident
 
 Each finding opens with:
