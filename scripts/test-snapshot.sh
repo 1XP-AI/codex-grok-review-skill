@@ -16,7 +16,7 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-src="$here/codex-review.sh"
+src="$here/codex-grok-review.sh"
 fn="$(sed -n '/^fetch_findings_settled() {/,/^}/p' "$src")"
 [ -n "$fn" ] || { echo "fetch_findings_settled not found in $src — renamed?" >&2; exit 1; }
 eval "$fn"

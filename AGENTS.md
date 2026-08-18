@@ -3,7 +3,7 @@
 Tool-agnostic rules for reading Codex and Grok code-review findings and driving the
 `@codex review` loop. Paste into your repo's `AGENTS.md`, or point your agent here.
 
-Companion wrapper: `scripts/codex-review.sh` (needs `gh` + `jq`). Use it instead of
+Companion wrapper: `scripts/codex-grok-review.sh` (needs `gh` + `jq`). Use it instead of
 composing `gh` calls by hand.
 
 ## Rules
@@ -112,8 +112,12 @@ status → not reviewed?  → request → wait → status
     Grok posts as `1xp-dorami`. Only accept a 1xp-dorami comment when the body has
     `![P0 Badge]`–`![P4 Badge]` or `Didn't find any major issues` — a chat note from
     that login is not a finding. An open badge from either author makes `status`
-    exit `2`; a Codex CLEAN must not cover a Grok P2. `status` is `0` when either author posted a clean verdict naming HEAD and there
-    is no open badge. Keep `@codex review` / `wait` Codex-only.
+    exit `2`; a Codex CLEAN must not cover a Grok P2. `status` is `0` only when the
+    `REQUIRED_REVIEWERS` policy is met — `codex` (default), `grok`, `codex grok`
+    for both, or `either` for one-of. A reviewer that is absent because it is down
+    or rate-limited is indistinguishable over the API from one that was never
+    installed, so this is configured, not inferred. Keep `@codex review` / `wait`
+    Codex-only.
 
 ## Verifying claims about this behaviour
 

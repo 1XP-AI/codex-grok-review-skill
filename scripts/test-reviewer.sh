@@ -7,8 +7,8 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-src="$here/codex-review.sh"
-[ -f "$src" ] || { echo "cannot find codex-review.sh next to this script" >&2; exit 1; }
+src="$here/codex-grok-review.sh"
+[ -f "$src" ] || { echo "cannot find codex-grok-review.sh next to this script" >&2; exit 1; }
 
 # Source the login defaults and the builder from the real script so a
 # login change cannot pass here and fail in the wrapper.
@@ -79,6 +79,139 @@ check 'Grok P4 severity from badge alt' "$got" 'P4'
 # Clean SHA capture — same regex clean_verdicts uses.
 got="$(printf '%s' "$grok_clean" | jq -r '.body | capture("Reviewed commit:\\*\\*\\s*`(?<s>[0-9a-f]+)`") | .s')"
 check 'Grok clean SHA from Reviewed commit' "$got" 'd94a859dde'
+
+# --- one spelling of the clean phrase ----------------------------------------
+#
+# The reviewer gate and the clean-verdict filter used to spell the apostrophe
+# differently: `[Dd]idn.t` admitted a curly one, `[Dd]idn't` did not. A comment
+# with a typographic apostrophe therefore counted as a review and then produced
+# no verdict — "reviewed, nothing filed", which reads as CLEAN. Both now go
+# through is_clean_body, so the two answers cannot disagree again.
+# U+2019 is built at runtime, not typed: a literal curly quote in shell source
+# trips shellcheck SC1112, and this file has to stay lint-clean to run in CI.
+rsquo="$(printf '\u2019')"
+curly='{"user":{"login":"1xp-dorami"},"body":"Grok Review: Didn'"$rsquo"'t find any major issues.\n\n**Reviewed commit:** `d94a859dde`"}'
+ask 'curly apostrophe is a clean body'    "$curly"      '.body | is_clean_body' 'true'
+ask 'curly apostrophe is a reviewer'      "$curly"      'is_reviewer'           'true'
+ask 'straight apostrophe is a clean body' "$grok_clean" '.body | is_clean_body' 'true'
+ask 'a P-badge alone is not a clean body' "$grok_p2"    '.body | is_clean_body' 'false'
+ask 'chatter is not a clean body'         "$noise"      '.body | is_clean_body' 'false'
+# The invariant behind the shared def: a body that reads as a clean verdict must
+# also read as review output. Break it and a Grok clean verdict stops being a
+# reviewer at all, which is the same silent hole from the other direction.
+for fx in "$codex_clean" "$grok_clean" "$curly" "$grok_p2" "$noise" "$other"; do
+  got="$(printf '%s' "$fx" | jq -r "${JQ_REVIEWER_LIB}"'.body
+    | (is_clean_body | not) or is_review_body')"
+  check 'clean body implies review body' "$got" 'true'
+done
+
+# --- the reviews endpoint is read Codex-only ---------------------------------
+#
+# review_count / latest_review_date / review_shas select on `is_codex`, not
+# `is_reviewer`. This pins WHY: a review object carrying only inline comments has
+# an empty body, so the body-shaped gate would drop it. Widening the gate instead
+# would let a stray Grok review object count as a review — the false "reviewed"
+# this tool exists to prevent.
+grok_review_obj='{"user":{"login":"1xp-dorami"},"body":"","submitted_at":"2026-01-01T00:00:00Z"}'
+codex_review_obj='{"user":{"login":"chatgpt-codex-connector[bot]"},"body":"**Reviewed commit:** `d94a859dde`","submitted_at":"2026-01-01T00:00:00Z"}'
+ask 'empty-body Grok review fails is_reviewer' "$grok_review_obj"  'is_reviewer'            'false'
+ask 'empty-body Codex review is still Codex'   "$codex_review_obj" '.user.login | is_codex' 'true'
+ask 'Grok review object is not Codex'          "$grok_review_obj"  '.user.login | is_codex' 'false'
+
+# --- clean_verdicts runs for real, against a stubbed fetch ---------------------
+#
+# The function is sourced and its ONE network call is stubbed, so the actual jq
+# program runs. That matters: `clean_verdicts` swallows jq errors
+# (`2>/dev/null || true`), so a program that fails to compile returns an empty
+# list and reads as "no clean verdict" — indistinguishable from a real answer.
+#
+# It did. `$who` sat unescaped inside a double-quoted jq program, so the SHELL
+# expanded it before jq ever saw it: `who=codex` compiled to `if codex == "codex"`,
+# jq answered `codex/0 is not defined`, and the caller got nothing. `wait` reads
+# `clean_verdicts <repo> <pr> codex` as its strongest exit signal, so that signal
+# was dead. Asserting on output rather than on exit status is what pins it.
+eval "$(sed -n '/^clean_verdicts() {/,/^}/p' "$src")"
+FIXTURES='['"$codex_clean"','"$grok_clean"','"$grok_p2"','"$noise"']'
+api_all() { printf '%s' "$FIXTURES"; }
+
+got="$(clean_verdicts fake-repo 1 | cut -f3 | paste -sd, -)"
+check 'clean_verdicts all  -> both authors' "$got" 'codex,grok'
+got="$(clean_verdicts fake-repo 1 codex | cut -f3 | paste -sd, -)"
+check 'clean_verdicts codex -> codex only'  "$got" 'codex'
+got="$(clean_verdicts fake-repo 1 grok | cut -f3 | paste -sd, -)"
+check 'clean_verdicts grok  -> grok only'   "$got" 'grok'
+got="$(clean_verdicts fake-repo 1 codex | cut -f2)"
+check 'clean_verdicts keeps the reviewed sha' "$got" 'd94a859dde'
+
+# --- REQUIRED_REVIEWERS: who still owes a verdict ------------------------------
+#
+# Pure text over a clean_verdicts snapshot. A reviewer is missing when it filed no
+# clean verdict, or when its latest one names a commit that is not HEAD.
+eval "$(sed -n '/^reviewer_vouched() {/,/^}/p' "$src")"
+eval "$(sed -n '/^missing_reviewers() {/,/^}/p' "$src")"
+grok_only="$(printf '2026-01-01T00:00:00Z\tabc123\tgrok\n')"
+codex_only="$(printf '2026-01-01T00:00:00Z\tabc123\tcodex\n')"
+both="$(printf '2026-01-01T00:00:00Z\tabc123\tcodex\n2026-01-02T00:00:00Z\tabc123\tgrok\n')"
+stale_codex="$(printf '2026-01-01T00:00:00Z\tdeadbee\tcodex\n')"
+
+# missing_reviewers reads REQUIRED_REVIEWERS as a global. It is defined by the eval
+# above, which shellcheck cannot see through, so every assignment here looks unused.
+# shellcheck disable=SC2034
+REQUIRED_REVIEWERS='codex'
+check 'req codex: grok-only clean leaves codex' "$(missing_reviewers "$grok_only" abc123def)"   'codex'
+check 'req codex: codex clean on an older sha'  "$(missing_reviewers "$stale_codex" abc123def)" 'codex'
+check 'req codex: no verdicts at all'           "$(missing_reviewers "" abc123def)"             'codex'
+# shellcheck disable=SC2034
+REQUIRED_REVIEWERS='grok'
+check 'req grok: grok clean satisfies it'       "$(missing_reviewers "$grok_only" abc123def)"   ''
+# shellcheck disable=SC2034
+REQUIRED_REVIEWERS='codex grok'
+check 'req both: grok alone is not enough'      "$(missing_reviewers "$grok_only" abc123def)"   'codex'
+check 'req both: both clean satisfies it'       "$(missing_reviewers "$both" abc123def)"        ''
+
+# `either` — one reviewer naming HEAD is enough.
+#
+# A repo running both bots may genuinely want this: whoever answers first has read
+# the code. Without a token for it the policy is inexpressible, and AND-only would
+# park such a repo at exit 3 every time one bot is rate-limited.
+# shellcheck disable=SC2034
+REQUIRED_REVIEWERS='either'
+check 'either: grok alone satisfies it'    "$(missing_reviewers "$grok_only" abc123def)"  ''
+check 'either: codex alone satisfies it'   "$(missing_reviewers "$codex_only" abc123def)" ''
+check 'either: both satisfies it'          "$(missing_reviewers "$both" abc123def)"       ''
+check 'either: nobody named HEAD'          "$(missing_reviewers "" abc123def)"            'codex or grok'
+check 'either: only a stale codex verdict' "$(missing_reviewers "$stale_codex" abc123def)" 'codex or grok'
+# shellcheck disable=SC2034
+REQUIRED_REVIEWERS='any'
+check 'any is a synonym for either'        "$(missing_reviewers "$grok_only" abc123def)"  ''
+
+# Rejected at startup, before any network call. An unsatisfiable or incoherent
+# policy must not become a `status` that never returns 0.
+reject() {
+  local name="$1" value="$2" want="$3" got
+  got="$(REQUIRED_REVIEWERS="$value" bash "$src" -h 2>&1 >/dev/null | head -1)"
+  case "$got" in *"$want"*) check "$name" 'rejected' 'rejected' ;;
+                 *) check "$name" "${got:-<no error>}" "…$want…" ;; esac
+}
+reject 'comma form is one token, not two' 'codex,grok' 'unknown reviewer'
+reject 'an unknown name'                  'bogus'      'unknown reviewer'
+reject 'either cannot be combined'        'either grok' 'cannot be combined'
+reject 'empty names nobody'               ''            'names no reviewer'
+# Set-but-blank was the dangerous one: it matched neither `either|any` nor '',
+# so the validation loop ran zero times and passed, missing_reviewers ran the
+# same empty loop and reported nothing missing, and any author's HEAD-clean
+# became clean-head/0 — the no-policy behaviour this variable exists to stop.
+reject 'spaces only'                      '   '         'names no reviewer'
+reject 'a tab only'                       "$(printf '\t')" 'names no reviewer'
+# Normalising to tokens also makes padding mean what it looks like.
+got="$(REQUIRED_REVIEWERS=' either ' bash "$src" -h 2>&1 >/dev/null | grep -c REQUIRED_REVIEWERS || true)"
+check 'padded either is still either' "$got" '0'
+got="$(REQUIRED_REVIEWERS='codex   grok' bash "$src" -h 2>&1 >/dev/null | grep -c REQUIRED_REVIEWERS || true)"
+check 'repeated spaces are one separator' "$got" '0'
+# `either` itself must get PAST validation — it may still fail later for want of a
+# real repo, but never with a REQUIRED_REVIEWERS complaint.
+got="$(REQUIRED_REVIEWERS='either' bash "$src" -h 2>&1 >/dev/null | grep -c REQUIRED_REVIEWERS || true)"
+check 'either passes validation' "$got" '0'
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
