@@ -11,23 +11,29 @@ set -euo pipefail
 # Codex still posts as chatgpt-codex-connector[bot] (login startswith this).
 # Grok reviews post as 1xp-dorami. Only comments that look like a review count —
 # a P-badge or the clean-verdict phrase. Random 1xp-dorami chatter is ignored.
-CODEX_LOGIN="chatgpt-codex-connector"
-GROK_LOGIN="1xp-dorami"
+# Override either login via the environment (or by editing these defaults)
+# so a different installation does not have to fork the jq filters.
+CODEX_LOGIN="${CODEX_LOGIN:-chatgpt-codex-connector}"
+GROK_LOGIN="${GROK_LOGIN:-1xp-dorami}"
 
 # jq library spliced into every comment/review filter.
+# Built from CODEX_LOGIN / GROK_LOGIN so the two cannot drift.
 # is_reviewer       — Codex login, or Grok login with a review-shaped body
 # is_finding_author — Codex login, or Grok login with a P-badge (clean != finding)
-JQ_REVIEWER_LIB='
-def is_codex: startswith("chatgpt-codex-connector");
-def is_grok: . == "1xp-dorami";
-def is_review_body: test("!\\[P[0-9] Badge\\]") or test("[Dd]idn.t find any major issues");
+jq_reviewer_lib() {
+  cat <<EOF
+def is_codex: startswith("${CODEX_LOGIN}");
+def is_grok: . == "${GROK_LOGIN}";
+def is_review_body: test("!\\\[P[0-9] Badge\\\]") or test("[Dd]idn.t find any major issues");
 def is_reviewer:
   (.user.login | is_codex)
   or ((.user.login | is_grok) and (.body // "" | is_review_body));
 def is_finding_author:
   (.user.login | is_codex)
-  or ((.user.login | is_grok) and (.body // "" | test("!\\[P[0-9] Badge\\]")));
-'
+  or ((.user.login | is_grok) and (.body // "" | test("!\\\[P[0-9] Badge\\\]")));
+EOF
+}
+JQ_REVIEWER_LIB="$(jq_reviewer_lib)"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
@@ -684,8 +690,8 @@ cmd_detail() {
 }
 
 cmd_status() {
-  local repo pr head head_sha json open p1 reviews thumbs latest issue_open
-  local clean clean_line clean_sha clean_at clean_matches_head
+  local repo pr head head_sha json open blocking reviews thumbs latest issue_open
+  local clean clean_line clean_sha clean_at clean_matches_head sev_counts
   repo="$(resolve_repo)"; pr="$1"
   head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   # BEFORE the findings, and read once. A review landing between the two reads
@@ -693,7 +699,10 @@ cmd_status() {
   reviews="$(review_count "$repo" "$pr")"
   json="$(fetch_findings_settled "$repo" "$pr" "$head" "$head_sha" "$reviews")"
   open="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)] | length')"
-  p1="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true and .severity == "P1")] | length')"
+  blocking="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true and (.severity == "P0" or .severity == "P1"))] | length')"
+  sev_counts="$(printf '%s' "$json" | jq -r '
+    [.[] | select(.stale == false and .anchored == true) | .severity]
+    | group_by(.) | map("\(.[0]):\(length)") | join(" ")')"
   # An issue-comment finding is evidence a review happened even when no review
   # object exists — otherwise `status` reports "not reviewed yet" while a P1 it
   # just listed sits on the PR.
@@ -723,7 +732,7 @@ cmd_status() {
   else
     echo "  clean verdict : none"
   fi
-  echo "  open findings : $open  (P1: $p1)"
+  echo "  open findings : $open${sev_counts:+  ($sev_counts)}"
 
   # The decision itself lives in verdict_key. Everything below renders it.
   local key code total
@@ -751,7 +760,7 @@ cmd_status() {
       echo "                  finding list is empty. Re-run; do not read this as clean." ;;
     open)
       echo "  VERDICT       : $open OPEN FINDING(S) — address before merging."
-      [ "$p1" -gt 0 ] && echo "                  ⚠ $p1 of them are P1." ;;
+      [ "$blocking" -gt 0 ] && echo "                  ⚠ $blocking of them are P0/P1." ;;
     *)
       die "internal: unknown verdict key '$key'" ;;
   esac

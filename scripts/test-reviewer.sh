@@ -10,15 +10,10 @@ here="$(cd "$(dirname "$0")" && pwd)"
 src="$here/codex-review.sh"
 [ -f "$src" ] || { echo "cannot find codex-review.sh next to this script" >&2; exit 1; }
 
-eval "$(python3 - "$src" <<'PY'
-import sys
-from pathlib import Path
-t = Path(sys.argv[1]).read_text()
-start = t.index("JQ_REVIEWER_LIB='")
-end = t.index("\n'", start) + 2
-print(t[start:end])
-PY
-)"
+# Source the login defaults and the builder from the real script so a
+# login change cannot pass here and fail in the wrapper.
+eval "$(awk '/^CODEX_LOGIN=/{p=1} p{print} /^JQ_REVIEWER_LIB=/{exit}' "$src")"
+JQ_REVIEWER_LIB="$(jq_reviewer_lib)"
 [ -n "${JQ_REVIEWER_LIB:-}" ] || { echo "JQ_REVIEWER_LIB not extracted" >&2; exit 1; }
 
 pass=0; fail=0
