@@ -43,6 +43,17 @@ gh api repos/OWNER/REPO/issues/123/comments \
 That is not hypothetical: it is how this wrapper came to report `CLEAN` on a PR with an
 open P1. Both endpoints have to be read and merged, which is what the wrapper does.
 
+**And do not make the permalink a requirement while you are at it.** Reading both
+endpoints is not enough if the parser then drops what it cannot place. `capture` in jq
+emits *nothing* when it does not match, so `($body | capture("blob/...")) as $loc`
+deletes the whole finding — badge, severity and all — rather than leaving the location
+blank. Measured on the fixtures in `scripts/test-issue-findings.sh`: three badge-carrying
+comments in, one out, and `status` answering `REVIEWED, CLEAN / 0` over an open P0.
+
+The permalink is a Codex habit, not a contract, and `1xp-dorami` is under no obligation
+to copy it. A finding nobody can place is still a finding: report it as
+`(location unknown)` and let it block the merge.
+
 ### 2. Severity is a markdown image badge — easy to strip by accident
 
 Each finding opens with:

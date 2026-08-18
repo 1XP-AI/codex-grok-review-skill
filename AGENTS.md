@@ -34,8 +34,19 @@ composing `gh` calls by hand.
      range `#L12-L14` — keep both ends), and the commit the finding was made against.
      That SHA is what `original_commit_id` is for an inline finding; compare it to the
      PR head to decide staleness.
+   - But it is **optional**, and a parser that requires it is the two-endpoint bug
+     again in miniature. `capture` in jq emits nothing on no match, so binding it with
+     `as` **deletes the finding** instead of leaving the location blank. Fall back to an
+     unlocated, non-stale finding and let it block the merge. The permalink is a Codex
+     habit; Grok is under no obligation to copy it.
    - The badge sits **inside** the `**...**` and is wrapped in `<sub>`, sometimes doubled,
      sometimes absent. Anchoring the title regex on the wrappers yields `(untitled)`.
+   - It also appears **ahead of** the bold run — `![P0 Badge](…) **Title**` — and one
+     regex does not read both placements. Against that shape `\s*(?<t>[^*\n]+)\*\*`
+     cannot start on the `*` it faces, backtracks onto the space before it, and captures
+     the space; the title trims to `""`, and an empty string is *truthy* to `//`, so not
+     even `(untitled)` survives. Try bold-first, then wrapped, and reject a blank match
+     from each.
    - A **second** blob permalink may follow, pointing at the AGENTS.md rule the finding
      cites. Take the first match — and do not mistake its `#L327-L335` for the location.
 

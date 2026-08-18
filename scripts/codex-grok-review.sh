@@ -301,11 +301,49 @@ fetch_issue_findings() {
         | . as $c
         # Ranged permalinks exist (#L12-L14). Both ends are kept: reporting only
         # the first turns a reviewed range into a single line.
-        | ($c.body | capture("blob/(?<sha>[0-9a-f]{7,40})/(?<path>[^#\\s]+)#L(?<a>[0-9]+)(-L(?<b>[0-9]+))?")) as $loc
+        #
+        # And it FALLS BACK, because `capture` emits nothing when it does not
+        # match and `as` over an empty stream drops the whole element. Every
+        # other field below is guarded with `//`; this one was not, so a
+        # badge-carrying comment whose body has no blob permalink disappeared
+        # from the list entirely — the CLEAN-over-an-open-P1 answer this reader
+        # exists to prevent, arriving by a second route. Measured: three badge
+        # comments in, one out.
+        #
+        # The permalink is a Codex habit, not a contract; nothing makes Grok
+        # follow it, and `is_finding_author` now accepts Grok on this endpoint.
+        # The Grok fixtures in test-reviewer.sh carry no permalink: they passed
+        # the predicate and died here.
+        #
+        # (No apostrophes in this block. The jq program is a single-quoted shell
+        # string, so one ends it — which is how the first draft of this comment
+        # broke the whole script.)
+        #
+        # An unlocated finding is still a finding. `sha: ""` makes it live
+        # rather than stale (see the `stale` rule below), so the failure lands
+        # on the side of reporting something we cannot place instead of
+        # silently reporting nothing.
+        | (($c.body | capture("blob/(?<sha>[0-9a-f]{7,40})/(?<path>[^#\\s]+)#L(?<a>[0-9]+)(-L(?<b>[0-9]+))?"))
+           // { sha: "", path: "(location unknown)", a: "0", b: null }) as $loc
         # The badge headline appears both wrapped in <sub> and bare. Requiring
         # the wrappers produced "(untitled)" and left the whole heading sitting
         # in the rationale.
-        | (($c.body | capture("!\\[P[0-9] Badge\\]\\([^)]*\\)(</sub>)*\\s*(?<t>[^*\\n]+)\\*\\*") | .t | trim) // "(untitled)") as $title
+        #
+        # TWO placements, so two patterns. The badge sits inside the bold run
+        # (`**<sub>BADGE</sub> Title**`) or ahead of it (`BADGE **Title**`), and
+        # one regex cannot read both: against the second shape, `[^*\n]+` cannot
+        # start on the `*` it faces, backtracks onto the single space before it,
+        # and captures that space. The title then trims to EMPTY — not even
+        # "(untitled)", because an empty string is truthy to `//`. The bare shape
+        # is what the grok_p0 and grok_p4 fixtures in test-reviewer.sh look like.
+        #
+        # Bold-first is tried first: on the wrapped shape it simply does not
+        # match, while the wrapped pattern on a bare heading is the case above.
+        # `select(length > 0)` on each is what makes `//` fall through a match
+        # that came back blank.
+        | ((($c.body | capture("!\\[P[0-9] Badge\\]\\([^)]*\\)(</sub>)*\\s*\\*\\*\\s*(?<t>[^*\\n]+)") | .t | trim | select(length > 0))
+            // ($c.body | capture("!\\[P[0-9] Badge\\]\\([^)]*\\)(</sub>)*\\s*(?<t>[^*\\n]+)\\*\\*") | .t | trim | select(length > 0))
+            // "(untitled)")) as $title
         | ($c.body
            | sub("^[\\s\\S]*?!\\[P[0-9] Badge\\]\\([^)]*\\)(</sub>)*[^\\n]*\\n"; "")
            | sub("\\s*<details>[\\s\\S]*$"; "")
