@@ -382,6 +382,8 @@ Codex reviews a PR when you:
 ## Contributing
 
 Behaviour here is measured, not assumed. If you change a documented claim, include
-the command you ran and its output. Reviewer logins: `chatgpt-codex-connector*` (Codex)
-and `1xp-dorami` (Grok, only when the body looks like a review). `@codex review` /
-`wait` / `request` stay Codex-only. Severity badges are `P0`–`P4`.
+the command you ran and its output. Reviewer logins come from `CODEX_LOGIN`
+(default `chatgpt-codex-connector`) and `GROK_LOGIN` (default `1xp-dorami`);
+override either in the environment. Grok comments count only when the body looks
+like a review. `@codex review` / `wait` / `request` stay Codex-only. Severity
+badges are `P0`–`P4`.
