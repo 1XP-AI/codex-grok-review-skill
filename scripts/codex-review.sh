@@ -367,7 +367,7 @@ has_thumbsup() {
 # The sign-off wanders ("Bravo.", "Breezy!", "Keep them coming!", …), so never match
 # on it. The `Reviewed commit` hash is the valuable part: unlike a 👍 reaction, it
 # proves WHICH commit was reviewed. Emits "<iso8601>\t<sha>" per clean verdict.
-# $3 = all|codex|grok (default all). wait stays Codex-only; status needs both.
+# $3 = all|codex|grok (default all). wait stays Codex-only.
 clean_verdicts() {
   local who="${3:-all}"
   api_all "repos/$1/issues/$2/comments" | jq -r --arg who "$who" "${JQ_REVIEWER_LIB}[ .[]
@@ -377,19 +377,8 @@ clean_verdicts() {
               if $who == \"codex\" then (.user.login | is_codex)
               elif $who == \"grok\" then (.user.login | is_grok)
               else true end)
-          | { created_at, sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\"), who: (if (.user.login | is_codex) then \"codex\" else \"grok\" end) }
-        ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\t\(.who)\"" 2>/dev/null || true
-}
-
-# Latest clean SHA for one author ($4) that prefixes $3 (the head).
-clean_sha_for() {
-  local line sha
-  line="$(clean_verdicts "$1" "$2" "$4" | tail -n 1)"
-  sha="$(printf '%s' "$line" | cut -f2)"
-  if [ -n "$sha" ] && [ -n "$3" ]; then
-    case "$3" in "$sha"*) printf '%s' "$sha"; return 0 ;; esac
-  fi
-  return 1
+          | { created_at, sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
+        ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\"" 2>/dev/null || true
 }
 
 # Has any Codex review stated THIS head commit as the one it reviewed?
@@ -515,8 +504,7 @@ cmd_json() {
 # Echoes a key; returns the exit code that goes with it.
 verdict_key() {
   local open="$1" total="$2" reviews="$3" thumbs="$4" clean_line="$5" \
-        clean_matches_head="$6" clean_sha="$7" issue_open="$8" \
-        both_clean="${9:-0}"
+        clean_matches_head="$6" clean_sha="$7" issue_open="$8"
 
   # Either author naming HEAD is enough. An open badge from either side
   # still wins (open==0 is required). wait/request stay Codex-only.
@@ -601,13 +589,8 @@ verdict_for() {
     case "$head_sha" in "$clean_sha"*) matches=1 ;; esac
   fi
 
-  local both=0
-  if clean_sha_for "$repo" "$pr" "$head_sha" codex >/dev/null \
-     && clean_sha_for "$repo" "$pr" "$head_sha" grok >/dev/null; then
-    both=1
-  fi
   verdict_key "$open" "$total" "$reviews" "$thumbs" "$clean_line" "$matches" \
-    "$clean_sha" "$(issue_open_in "$json")" "$both"
+    "$clean_sha" "$(issue_open_in "$json")"
 }
 
 print_findings() {
@@ -761,13 +744,8 @@ cmd_status() {
   # The decision itself lives in verdict_key. Everything below renders it.
   local key code total
   code=0
-  local both=0
-  if clean_sha_for "$repo" "$pr" "$head_sha" codex >/dev/null \
-     && clean_sha_for "$repo" "$pr" "$head_sha" grok >/dev/null; then
-    both=1
-  fi
   key="$(verdict_key "$open" "$(printf '%s' "$json" | jq 'length')" "$reviews" "$thumbs" \
-        "$clean_line" "$clean_matches_head" "$clean_sha" "${issue_open:-0}" "$both")" || code=$?
+        "$clean_line" "$clean_matches_head" "$clean_sha" "${issue_open:-0}")" || code=$?
   total="$(printf '%s' "$json" | jq 'length')"
 
   case "$key" in
