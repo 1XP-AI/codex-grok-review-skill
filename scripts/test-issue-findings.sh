@@ -41,15 +41,16 @@ check() {
 
 # --- fixtures ---------------------------------------------------------------
 #
-# Nine issue comments; six of them are findings. The permalink-less pair is
-# the regression guard, and id 4 is the heading shape it exposed.
+# Ten issue comments; seven of them are findings. The permalink-less pair is
+# the regression guard, id 4 is the heading shape it exposed, and id 10 is the
+# body whose only blob link is a rule citation.
 HEAD_SHA='cf125d41c7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
 FIXTURE="$(cat <<'JSON'
 [
   { "id": 1, "created_at": "2026-08-18T00:01:00Z", "html_url": "u1",
     "user": { "login": "chatgpt-codex-connector[bot]" },
-    "body": "### 💡 Codex Review\n\nhttps://github.com/O/R/blob/cf125d41c7/packages/api/src/routes/auth.ts#L169\n**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Move sign-in keying after body parsing**\n\nWith the default onRequest hook the POST body has not been parsed. Key the limiter after parsing.\n\nAGENTS.md reference: [AGENTS.md:L327-L335](https://github.com/O/R/blob/cf125d41c7/AGENTS.md#L327-L335)" },
+    "body": "### 💡 Codex Review\n\nhttps://github.com/O/R/blob/cf125d41c7/packages/api/src/routes/auth.ts#L169\n**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Move sign-in keying after body parsing**\n\nWith the default onRequest hook the POST body has not been parsed. Key the limiter after parsing.\n\nAGENTS.md reference: [AGENTS.md:L327-L335](https://github.com/O/R/blob/deadbee1234/AGENTS.md#L327-L335)" },
 
   { "id": 2, "created_at": "2026-08-18T00:02:00Z", "html_url": "u2",
     "user": { "login": "chatgpt-codex-connector[bot]" },
@@ -81,7 +82,11 @@ FIXTURE="$(cat <<'JSON'
 
   { "id": 9, "created_at": "2026-08-18T00:09:00Z", "html_url": "u9",
     "user": { "login": "1xp-dorami" },
-    "body": "![P4 Badge](https://img.shields.io/badge/P4-lightgrey?style=flat) no bold heading anywhere in this body" }
+    "body": "![P4 Badge](https://img.shields.io/badge/P4-lightgrey?style=flat) no bold heading anywhere in this body" },
+
+  { "id": 10, "created_at": "2026-08-18T00:12:00Z", "html_url": "u10",
+    "user": { "login": "1xp-dorami" },
+    "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Cite-only, no code link**\n\nThe path is dereferenced before the check.\n\nAGENTS.md reference: [AGENTS.md:L327-L335](https://github.com/O/R/blob/deadbee1234/AGENTS.md#L327-L335)" }
 ]
 JSON
 )"
@@ -114,8 +119,26 @@ check 'permalink-less finding is anchored'    "$(by 3 '.anchored')"   'true'
 check 'permalink-less finding keeps its url'  "$(by 4 '.url')"        'u4'
 check 'permalink-less finding has no range'   "$(by 4 '.start_line')" 'null'
 
+# --- the citation is provenance, not a location ------------------------------
+#
+# When a finding cites a repo rule, Codex appends
+#   AGENTS.md reference: [AGENTS.md:L327-L335](.../blob/<sha>/AGENTS.md#L327-L335)
+# which is a blob permalink too. On a body with no code permalink it is the FIRST
+# and only match, so the finding was located in AGENTS.md and dated by the cited
+# commit — not HEAD, so it came out STALE and vanished from `status` exactly as
+# being dropped had. Same wrong answer, third route in.
+check 'cite-only finding is not placed in AGENTS.md' "$(by 10 '.path')" '(location unknown)'
+check 'cite-only finding takes no sha from the cite' "$(by 10 '.reviewed_sha')" ''
+check 'cite-only finding stays live'                 "$(by 10 '.stale')" 'false'
+check 'cite-only finding keeps its severity'         "$(by 10 '.severity')" 'P2'
+# The citation stays in the rationale, where it is useful.
+check 'cite stays in the rationale'                  "$(by 10 '.rationale | test("reference:")')" 'true'
+# And stripping the footer must not cost a finding its real location: id 1 has a
+# code permalink first and a citation naming a DIFFERENT commit.
+check 'code permalink still beats the cite'          "$(by 1 '.path')|$(by 1 '.reviewed_sha')" 'packages/api/src/routes/auth.ts|cf125d41c7'
+
 # --- the shapes that already worked, so the fallback cannot mask them --------
-check 'total findings parsed'                "$(q 'length')"          '6'
+check 'total findings parsed'                "$(q 'length')"          '7'
 check 'located finding keeps its path'       "$(by 1 '.path')"        'packages/api/src/routes/auth.ts'
 check 'located finding keeps its line'       "$(by 1 '.line')"        '169'
 check 'located finding takes the FIRST link' "$(by 1 '.start_line')"  'null'
@@ -132,7 +155,7 @@ check 'wrong author is not a finding'        "$(q '[.[] | select(.id == 7)] | le
 
 # --- the count `status` actually gates on -----------------------------------
 # Both permalink-less findings land here. Before the fallback this was 3.
-check 'live findings counted'                "$(q '[.[] | select(.stale == false and .anchored == true)] | length')" '5'
+check 'live findings counted'                "$(q '[.[] | select(.stale == false and .anchored == true)] | length')" '6'
 
 # --- staleness by date, when there is no sha to compare ---------------------
 #
@@ -151,12 +174,12 @@ check 'unlocated, posted after head, live'   "$(d "$MID" 9 '.stale')" 'false'
 # The whole point: the merge gate lets go once the work moves on.
 # Live drops from 5 to 3: the two unlocated findings that predate the newest
 # commit let go, while id 9 (posted after it) and the two sha-matched ones hold.
-check 'stale unlocated stops blocking'       "$(printf '%s' "$MID" | jq '[.[] | select(.stale == false and .anchored == true)] | length')" '3'
+check 'stale unlocated stops blocking'       "$(printf '%s' "$MID" | jq '[.[] | select(.stale == false and .anchored == true)] | length')" '4'
 
 LATER="$(fetch_issue_findings "O/R" "$HEAD_SHA" 1 '2026-08-18T00:30:00Z')"
 # Selected on the empty sha, not on the source: every finding here is source
 # "issue", so that predicate would also count the one already stale by hash.
-check 'every unlocated goes stale eventually' "$(printf '%s' "$LATER" | jq '[.[] | select(.reviewed_sha == "" and .stale)] | length')" '3'
+check 'every unlocated goes stale eventually' "$(printf '%s' "$LATER" | jq '[.[] | select(.reviewed_sha == "" and .stale)] | length')" '4'
 # A sha that names HEAD outranks any date — the finding IS about this commit.
 check 'sha naming head beats a later date'   "$(d "$LATER" 1 '.stale')" 'false'
 

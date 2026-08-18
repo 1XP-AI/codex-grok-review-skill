@@ -53,6 +53,11 @@ composing `gh` calls by hand.
      from each.
    - A **second** blob permalink may follow, pointing at the AGENTS.md rule the finding
      cites. Take the first match — and do not mistake its `#L327-L335` for the location.
+     "First match" only works once that footer is out of the way, though: on a body with
+     **no** code permalink the citation is the first match, so the finding gets located in
+     AGENTS.md and dated by the cited commit — not HEAD, so it reads STALE and drops out
+     of the gate exactly as being deleted would. Strip from `\breference:` onward before
+     searching, and keep the line in the rationale as provenance.
 
 2. **Never strip markdown from a finding before reading its severity.** The
    `P0`–`P4` level is a badge image at the start of the body:

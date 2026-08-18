@@ -324,7 +324,22 @@ fetch_issue_findings() {
         # rather than stale (see the `stale` rule below), so the failure lands
         # on the side of reporting something we cannot place instead of
         # silently reporting nothing.
-        | (($c.body | capture("blob/(?<sha>[0-9a-f]{7,40})/(?<path>[^#\\s]+)#L(?<a>[0-9]+)(-L(?<b>[0-9]+))?"))
+        #
+        # Searched in the body MINUS the citation footer, not the whole body.
+        # When a finding cites a repo rule, Codex appends
+        #   AGENTS.md reference: [AGENTS.md:L327-L335](.../blob/<sha>/AGENTS.md#L327-L335)
+        # which is a blob permalink too. On a body that has no code permalink,
+        # that citation is the FIRST and only match, so the finding was located
+        # in AGENTS.md and dated by the cited commit — which is not HEAD, so it
+        # came out STALE and vanished from `status` exactly as being dropped had.
+        # Same wrong answer, third route in. Taking the first match is right only
+        # once the provenance link is out of the way.
+        #
+        # The footer pattern is the one the `fix` heuristic below already uses,
+        # for the same reason: that line is provenance, not content. It stays in
+        # the rationale, where it belongs.
+        | ($c.body | sub("\\n\\s*[^\\n]*\\breference:[\\s\\S]*$"; "")) as $locbody
+        | (($locbody | capture("blob/(?<sha>[0-9a-f]{7,40})/(?<path>[^#\\s]+)#L(?<a>[0-9]+)(-L(?<b>[0-9]+))?"))
            // { sha: "", path: "(location unknown)", a: "0", b: null }) as $loc
         # The badge headline appears both wrapped in <sub> and bare. Requiring
         # the wrappers produced "(untitled)" and left the whole heading sitting

@@ -54,6 +54,12 @@ The permalink is a Codex habit, not a contract, and `1xp-dorami` is under no obl
 to copy it. A finding nobody can place is still a finding: report it as
 `(location unknown)` and let it block the merge.
 
+Search for that permalink in the body **minus the `AGENTS.md reference:` footer**, too.
+The citation is a blob permalink as well, so on a body with no code permalink it is the
+first match: the finding gets placed in `AGENTS.md`, dated by the cited commit, and —
+since that is not HEAD — reads `STALE` and drops out of the gate exactly as deletion
+would. Same wrong answer, third route in.
+
 Then give it the **date** fallback the review-comment parser already has
 (`created_at < headdate`), or it blocks forever — with no sha there is nothing to compare
 against a new head, so the author fixes the code, pushes, and the gate keeps refusing
