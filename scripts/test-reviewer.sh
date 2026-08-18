@@ -7,8 +7,8 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-src="$here/codex-review.sh"
-[ -f "$src" ] || { echo "cannot find codex-review.sh next to this script" >&2; exit 1; }
+src="$here/codex-grok-review.sh"
+[ -f "$src" ] || { echo "cannot find codex-grok-review.sh next to this script" >&2; exit 1; }
 
 # Source the login defaults and the builder from the real script so a
 # login change cannot pass here and fail in the wrapper.

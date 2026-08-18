@@ -3,7 +3,7 @@
 Tool-agnostic rules for reading Codex and Grok code-review findings and driving the
 `@codex review` loop. Paste into your repo's `AGENTS.md`, or point your agent here.
 
-Companion wrapper: `scripts/codex-review.sh` (needs `gh` + `jq`). Use it instead of
+Companion wrapper: `scripts/codex-grok-review.sh` (needs `gh` + `jq`). Use it instead of
 composing `gh` calls by hand.
 
 ## Rules

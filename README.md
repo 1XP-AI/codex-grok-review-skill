@@ -1,4 +1,4 @@
-# codex-review-skill
+# codex-grok-review-skill
 
 Read **Codex** and **Grok** code-review findings on GitHub pull requests correctly, and drive the
 `@codex review` re-review loop — from Claude Code, Codex CLI, or any coding agent.
@@ -176,7 +176,7 @@ A finding is three things: **why it is a bug**, **what to change**, and **where*
 `detail` extracts all three, so you can start editing without opening the browser.
 
 ```
-$ codex-review detail 123
+$ codex-grok-review detail 123
 ────────────────────────────────────────────────────────────────────────
 [P2]  src/components/TopNav.tsx:316-317
        Make the dropdown scroll within short viewports
@@ -206,7 +206,7 @@ $ codex-review detail 123
   commented line, so the tail is the relevant part; `»»` marks the anchor line.
 - Findings are grouped by file and ordered by line, so each file is opened once.
 
-Set `CODEX_REVIEW_CONTEXT` to change how many lines of code context are shown.
+Set `CODEX_GROK_REVIEW_CONTEXT` to change how many lines of code context are shown.
 
 ---
 
@@ -221,23 +221,23 @@ with a message rather than quietly reporting no findings.
 Check yours with `gh --version`.
 
 ```bash
-git clone https://github.com/1XP-AI/codex-review-skill.git
-install -m 0755 codex-review-skill/scripts/codex-review.sh /usr/local/bin/codex-review
+git clone https://github.com/1XP-AI/codex-grok-review-skill.git
+install -m 0755 codex-grok-review-skill/scripts/codex-grok-review.sh /usr/local/bin/codex-grok-review
 ```
 
-Or run it in place: `./scripts/codex-review.sh status 123`
+Or run it in place: `./scripts/codex-grok-review.sh status 123`
 
 ### Claude Code
 
 Copy the skill so Claude loads it on demand:
 
 ```bash
-mkdir -p ~/.claude/skills/codex-review
-cp codex-review-skill/SKILL.md ~/.claude/skills/codex-review/
-cp -r codex-review-skill/scripts ~/.claude/skills/codex-review/
+mkdir -p ~/.claude/skills/codex-grok-review
+cp codex-grok-review-skill/SKILL.md ~/.claude/skills/codex-grok-review/
+cp -r codex-grok-review-skill/scripts ~/.claude/skills/codex-grok-review/
 ```
 
-Project-scoped instead: use `.claude/skills/codex-review/` inside the repo.
+Project-scoped instead: use `.claude/skills/codex-grok-review/` inside the repo.
 
 ### Codex CLI / other agents
 
@@ -249,14 +249,14 @@ this README. The rules are tool-agnostic; only the wrapper is bash.
 ## Usage
 
 ```bash
-codex-review status 123      # one-line verdict + counts
-codex-review findings 123    # open findings only, one line each
-codex-review detail 123      # open findings in full: why, what to fix, the code
-codex-review detail-all 123  # same, including stale ones
-codex-review all 123         # everything, incl. stale/outdated
-codex-review json 123        # machine-readable, for agents
-codex-review request 123     # post "@codex review"
-codex-review wait 123        # block until a review lands after your newest commit
+codex-grok-review status 123      # one-line verdict + counts
+codex-grok-review findings 123    # open findings only, one line each
+codex-grok-review detail 123      # open findings in full: why, what to fix, the code
+codex-grok-review detail-all 123  # same, including stale ones
+codex-grok-review all 123         # everything, incl. stale/outdated
+codex-grok-review json 123        # machine-readable, for agents
+codex-grok-review request 123     # post "@codex review"
+codex-grok-review wait 123        # block until a review lands after your newest commit
 ```
 
 Add `--repo OWNER/REPO` outside a checkout.
@@ -273,14 +273,14 @@ Add `--repo OWNER/REPO` outside a checkout.
 | 4 | Reviewed; all findings stale/outdated — confirm they were addressed |
 
 ```bash
-codex-review status 123 || echo "not clear to merge"
+codex-grok-review status 123 || echo "not clear to merge"
 ```
 
 ### Gate on severity
 
 ```bash
 # Block only on P1, matching a "no P1 blocks the merge" policy
-p1=$(codex-review json 123 \
+p1=$(codex-grok-review json 123 \
      | jq '[.[] | select(.stale==false and .anchored==true and .severity=="P1")] | length')
 [ "$p1" -eq 0 ] || { echo "P1 findings present"; exit 1; }
 ```
@@ -288,7 +288,7 @@ p1=$(codex-review json 123 \
 ### Sample output
 
 ```
-$ codex-review status 545
+$ codex-grok-review status 545
 PR #545  (owner/repo)
   newest commit : 2026-08-06T04:44:48Z  b28ef03af2
   codex reviews : 2  (latest 2026-08-06T04:50:57Z)
@@ -297,7 +297,7 @@ PR #545  (owner/repo)
   open findings : 1  (P1: 0)
   VERDICT       : 1 OPEN FINDING(S) — address before merging.
 
-$ codex-review status 549
+$ codex-grok-review status 549
 PR #549  (owner/repo)
   newest commit : 2026-08-06T05:17:05Z  63eef57b93
   codex reviews : 0
@@ -306,7 +306,7 @@ PR #549  (owner/repo)
   open findings : 0  (P1: 0)
   VERDICT       : REVIEWED, CLEAN — verdict names the newest commit.
 
-$ codex-review all 545
+$ codex-grok-review all 545
 [P2] src/components/ConfirmDialog.tsx:68
       Restore focus to a control that survives the state change
       https://github.com/owner/repo/pull/545#discussion_r...
@@ -329,13 +329,13 @@ a review into a **push**: an agent that starts it goes on to other work and is
 re-invoked the moment the review arrives, instead of re-checking on a timer.
 
 ```bash
-codex-review request 123
-CODEX_REVIEW_TIMEOUT=2400 CODEX_REVIEW_INTERVAL=45 codex-review wait 123 &
+codex-grok-review request 123
+CODEX_GROK_REVIEW_TIMEOUT=2400 CODEX_GROK_REVIEW_INTERVAL=45 codex-grok-review wait 123 &
 # … keep working. The exit wakes whatever is watching the job.
 ```
 
 In Claude Code, run `wait` as a background Bash task — completion notifies the agent.
-Tunables: `CODEX_REVIEW_TIMEOUT` (default 1800s) and `CODEX_REVIEW_INTERVAL`
+Tunables: `CODEX_GROK_REVIEW_TIMEOUT` (default 1800s) and `CODEX_GROK_REVIEW_INTERVAL`
 (default 60s). `wait` succeeds on a clean verdict naming your head commit **or** on a
 review submitted after it, so it fires for both outcomes; call `status` afterwards to
 find out which.
@@ -345,18 +345,18 @@ find out which.
 ## The review loop
 
 ```
-open PR  →  codex-review status
+open PR  →  codex-grok-review status
                 │
     ┌───────────┴───────────┐
   exit 3                  exit 2
 "not reviewed"        "open findings"
     │                       │
-codex-review request    reproduce each finding first
+codex-grok-review request    reproduce each finding first
     │                   fix → push
-codex-review wait           │
+codex-grok-review wait           │
     └───────────┬───────────┘
                 ▼
-         codex-review status  →  exit 0 / 4  →  merge
+         codex-grok-review status  →  exit 0 / 4  →  merge
 ```
 
 **Reproduce before you fix.** A review finding is a hypothesis about your code, not a
@@ -364,7 +364,7 @@ verdict. Confirm it, and if you cannot, say so with evidence — a well-argued r
 is a legitimate outcome.
 
 **Re-request after pushing.** Findings do not clear themselves; a fix push does not
-notify Codex. Run `codex-review request` again.
+notify Codex. Run `codex-grok-review request` again.
 
 ---
 
@@ -376,7 +376,7 @@ Codex reviews a PR when you:
 - mark a draft as ready, or
 - comment `@codex review`.
 
-`codex-review request` posts that comment for you.
+`codex-grok-review request` posts that comment for you.
 
 ---
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# codex-review — read Codex and Grok PR review findings correctly, and request re-reviews.
+# codex-grok-review — read Codex and Grok PR review findings correctly, and request re-reviews.
 #
 # Why this exists: the obvious `gh` invocations silently omit Codex findings or
 # throw away their severity. See README.md for the measured behaviour.
@@ -88,32 +88,32 @@ command -v jq >/dev/null || die "jq not found"
 
 usage() {
   cat <<'EOF'
-codex-review — read Codex and Grok PR review findings, and request re-reviews.
+codex-grok-review — read Codex and Grok PR review findings, and request re-reviews.
 
 USAGE
-  codex-review status <pr>     One-line verdict: has Codex reviewed? any open findings?
-  codex-review findings <pr>   Open findings, one line each, with severity + staleness
-  codex-review detail <pr>     Open findings in full: rationale, prescribed fix, code
-  codex-review detail-all <pr> Same, including stale/outdated findings
-  codex-review all <pr>        Every finding including outdated/resolved ones
-  codex-review json <pr>       Machine-readable findings (for agents/scripts)
-  codex-review request <pr>    Post "@codex review" to trigger a re-review
-  codex-review wait <pr>       Block until a review lands after the newest commit
+  codex-grok-review status <pr>     One-line verdict: has Codex reviewed? any open findings?
+  codex-grok-review findings <pr>   Open findings, one line each, with severity + staleness
+  codex-grok-review detail <pr>     Open findings in full: rationale, prescribed fix, code
+  codex-grok-review detail-all <pr> Same, including stale/outdated findings
+  codex-grok-review all <pr>        Every finding including outdated/resolved ones
+  codex-grok-review json <pr>       Machine-readable findings (for agents/scripts)
+  codex-grok-review request <pr>    Post "@codex review" to trigger a re-review
+  codex-grok-review wait <pr>       Block until a review lands after the newest commit
 
 OPTIONS
   -R, --repo OWNER/REPO   Target repo (default: repo of the current directory)
 
 ENVIRONMENT
-  CODEX_REVIEW_CONTEXT    Lines of code context in `detail` (default 12)
+  CODEX_GROK_REVIEW_CONTEXT  Lines of code context in `detail` (default 12)
 
 EXIT CODES (status / findings)
   0  reviewed, no open findings          2  open findings exist
   3  not reviewed yet                    4  reviewed, but findings are stale-only
 
 EXAMPLES
-  codex-review status 123
-  codex-review detail 123
-  codex-review request 123 && codex-review wait 123
+  codex-grok-review status 123
+  codex-grok-review detail 123
+  codex-grok-review request 123 && codex-grok-review wait 123
 EOF
 }
 
@@ -517,7 +517,7 @@ cmd_json() {
 #
 # `status` and `findings` both publish exit codes, and the help text promises they are
 # the same codes. They were not: `findings` returned 0 with open findings on screen, so
-# a merge gate written as `codex-review.sh findings N && merge` merged straight through
+# a merge gate written as `codex-grok-review.sh findings N && merge` merged straight through
 # them. Two copies of a rule this fiddly will drift again, so there is one copy, and
 # `status` renders its messages from the key rather than re-deciding.
 #
@@ -661,7 +661,7 @@ print_findings() {
 cmd_detail() {
   local repo pr head head_sha all json count ctx
   repo="$(resolve_repo)"; pr="$1"; all="${2:-open}"
-  ctx="${CODEX_REVIEW_CONTEXT:-12}"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
+  ctx="${CODEX_GROK_REVIEW_CONTEXT:-${CODEX_REVIEW_CONTEXT:-12}}"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   json="$(fetch_findings_settled "$repo" "$pr" "$head" "$head_sha")"
 
   if [ "$all" = "open" ]; then
@@ -773,10 +773,10 @@ cmd_status() {
       echo "  VERDICT       : REVIEWED, CLEAN — verdict names the newest commit." ;;
     not-reviewed)
       echo "  VERDICT       : NOT REVIEWED — no review, no 👍, no clean verdict."
-      echo "                  Trigger one:  codex-review request $pr" ;;
+      echo "                  Trigger one:  codex-grok-review request $pr" ;;
     stale-clean)
       echo "  VERDICT       : STALE CLEAN VERDICT — it names ${clean_sha}, not the newest commit."
-      echo "                  Newer commits are unreviewed:  codex-review request $pr" ;;
+      echo "                  Newer commits are unreviewed:  codex-grok-review request $pr" ;;
     all-stale)
       echo "  VERDICT       : REVIEWED — $total finding(s), all stale/outdated."
       echo "                  Confirm they are addressed, then merge." ;;
@@ -799,7 +799,7 @@ cmd_request() {
   gh pr comment "$pr" --repo "$repo" --body "@codex review" >/dev/null
   echo "Requested a Codex re-review on PR #$pr."
   echo "Note: a re-review typically takes several minutes."
-  echo "Then:  codex-review status $pr"
+  echo "Then:  codex-grok-review status $pr"
 }
 
 # Let a review pass go quiet before reporting it.
@@ -833,14 +833,14 @@ cmd_wait() {
   local reviews_at_entry reviews_now
   reviews_at_entry="$(hashless_review_count "$repo" "$pr")" \
     || die "could not read the reviews of PR #$pr in $repo."
-  deadline="${CODEX_REVIEW_TIMEOUT:-1800}"
-  interval="${CODEX_REVIEW_INTERVAL:-60}"
+  deadline="${CODEX_GROK_REVIEW_TIMEOUT:-${CODEX_REVIEW_TIMEOUT:-1800}}"
+  interval="${CODEX_GROK_REVIEW_INTERVAL:-${CODEX_REVIEW_INTERVAL:-60}}"
   # A review pass is not always one post — Codex has been observed splitting
   # one pass across posts seconds apart. Returning on the first post reports a
   # subset, and a caller whose merge rule is "no P1" can be shown "P1: 0" while
   # a P1 is still in flight. Let the stream go quiet before reporting.
-  settle_secs="${CODEX_REVIEW_SETTLE_SECONDS:-45}"
-  settle_max="${CODEX_REVIEW_SETTLE_MAX_TRIES:-4}"
+  settle_secs="${CODEX_GROK_REVIEW_SETTLE_SECONDS:-${CODEX_REVIEW_SETTLE_SECONDS:-45}}"
+  settle_max="${CODEX_GROK_REVIEW_SETTLE_MAX_TRIES:-${CODEX_REVIEW_SETTLE_MAX_TRIES:-4}}"
   elapsed=0
   local head_sha clean_sha reviewed_n issue_n
   head_sha="$(head_commit_sha "$repo" "$pr")"

@@ -1,24 +1,24 @@
 ---
-name: codex-review
+name: codex-grok-review
 description: Read Codex and Grok code-review findings on a GitHub pull request, and drive the @codex review re-review loop. Use whenever you need to check whether Codex or Grok reviewed a PR, read its findings with their P0–P4 severity, decide if a PR is clear to merge, or request a re-review after pushing fixes. The obvious `gh` commands silently omit findings and drop severity — always use this skill instead of hand-rolling `gh pr view`.
 ---
 
 # Codex / Grok review on GitHub PRs
 
 Codex and Grok post findings as **inline review comments** with severity badges. Reading them
-naïvely loses information in four ways. Use `scripts/codex-review.sh` rather than
+naïvely loses information in four ways. Use `scripts/codex-grok-review.sh` rather than
 composing `gh` calls yourself.
 
 ## Quick reference
 
 ```bash
-scripts/codex-review.sh status <pr>     # verdict + counts (exit code encodes it)
-scripts/codex-review.sh findings <pr>   # open findings, one line each
-scripts/codex-review.sh detail <pr>     # why / what to fix / the code, per finding
-scripts/codex-review.sh all <pr>        # incl. stale/outdated
-scripts/codex-review.sh json <pr>       # machine-readable
-scripts/codex-review.sh request <pr>    # post "@codex review"
-scripts/codex-review.sh wait <pr>       # block until a review lands
+scripts/codex-grok-review.sh status <pr>     # verdict + counts (exit code encodes it)
+scripts/codex-grok-review.sh findings <pr>   # open findings, one line each
+scripts/codex-grok-review.sh detail <pr>     # why / what to fix / the code, per finding
+scripts/codex-grok-review.sh all <pr>        # incl. stale/outdated
+scripts/codex-grok-review.sh json <pr>       # machine-readable
+scripts/codex-grok-review.sh request <pr>    # post "@codex review"
+scripts/codex-grok-review.sh wait <pr>       # block until a review lands
 ```
 
 Add `--repo OWNER/REPO` when outside a checkout.
@@ -75,13 +75,13 @@ place so they cannot drift (`findings` used to print open findings and exit `0`)
 4. **Fix, run the repo's own gates, push.**
 5. **Re-request, then let it wake you.** `request <pr>`, and run `wait <pr>` as a
    **background** job rather than polling `status` — its exit is the signal that a
-   verdict landed. Tune with `CODEX_REVIEW_TIMEOUT` / `CODEX_REVIEW_INTERVAL`. Findings do not clear themselves and a push does not
+   verdict landed. Tune with `CODEX_GROK_REVIEW_TIMEOUT` / `CODEX_GROK_REVIEW_INTERVAL`. Findings do not clear themselves and a push does not
    notify Codex.
 6. **Re-check before merging.** `status <pr>` again. If your merge policy is
    "no P1 blocks", gate on severity:
 
    ```bash
-   scripts/codex-review.sh json <pr> \
+   scripts/codex-grok-review.sh json <pr> \
      | jq '[.[] | select(.stale==false and .anchored==true and .severity=="P1")] | length'
    ```
 
