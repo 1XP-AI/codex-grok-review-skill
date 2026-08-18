@@ -81,9 +81,10 @@ Grok Review: Didn't find any major issues. 🚀
 
 A random `1xp-dorami` comment is **not** a review. Require `![P0 Badge]`–`![P4 Badge]`
 or `Didn't find any major issues`. An open badge from either author makes `status`
-exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` only when every
-reviewer in `REQUIRED_REVIEWERS` (default `codex`) posted a clean verdict naming HEAD
-and there is no open badge; a verdict from one reviewer does not answer for another.
+exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` only when there is
+no open badge **and** the [`REQUIRED_REVIEWERS`](#required_reviewers) policy is met:
+`codex` (default), `grok`, `codex grok` for both, or `either` for one-of. A verdict
+from one reviewer does not answer for another unless you say it may.
 `wait` / `request` stay Codex-only.
 
 So **"zero reviews" is ambiguous** — it means either *not reviewed yet* or *reviewed
@@ -393,12 +394,26 @@ badges are `P0`–`P4`.
 
 ### `REQUIRED_REVIEWERS`
 
-Who has to vouch for the newest commit before `status` exits `0`. Space-separated,
-`codex` and/or `grok`; the default is `codex`.
+Who has to vouch for the newest commit before `status` exits `0`. The default is
+`codex`.
+
+| value | meaning |
+|---|---|
+| `codex` *(default)* | Codex must have named HEAD |
+| `grok` | Grok must have named HEAD |
+| `codex grok` | **both** must — space-separated names are AND |
+| `either` (or `any`) | **one** of them is enough |
 
 ```bash
-REQUIRED_REVIEWERS="codex grok" codex-grok-review status 123
+REQUIRED_REVIEWERS="codex grok" codex-grok-review status 123   # both
+REQUIRED_REVIEWERS=either       codex-grok-review status 123   # whoever gets there first
 ```
+
+`either` is not the same as having no policy, and it is not the old behaviour by
+another name: an open badge from either author is still exit `2`. It is the rule a
+repo running both bots may genuinely want — whoever answers first has read the code
+— and it keeps that repo off exit `3` every time one bot is rate-limited. It stands
+alone; `either grok` has no coherent reading and is rejected rather than guessed at.
 
 This is configuration rather than something read off the PR, because the PR cannot
 tell you. "Grok is not installed here" and "Grok has not answered yet" look
@@ -422,4 +437,6 @@ and exits `3`, so a `status && merge` gate holds until Codex actually answers.
 An unknown name is rejected at startup rather than warned about: it could never be
 satisfied, so it would park `status` on `partial-clean` forever — and
 `REQUIRED_REVIEWERS=codex,grok` is one token, not two, which is exactly the typo
-that would do it.
+that would do it. `REQUIRED_REVIEWERS=` (explicitly empty) is rejected for the same
+reason rather than quietly falling back to the default: this variable decides
+whether a PR is callable clean, and that is not a policy to inherit by accident.

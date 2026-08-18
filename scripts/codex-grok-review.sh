@@ -58,19 +58,41 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 # repo: Codex hit its usage limit and posted nothing, Grok posted a clean naming
 # HEAD, and `status` answered REVIEWED, CLEAN / 0 for code Codex had not read.
 #
-# So it is configuration. The default is `codex`, which is what a repository that
-# installed this skill has; a repo running both sets "codex grok".
-REQUIRED_REVIEWERS="${REQUIRED_REVIEWERS:-codex}"
-for _r in $REQUIRED_REVIEWERS; do
-  case "$_r" in
-    codex|grok) ;;
-    # Not a warning. An unrecognised name can never be satisfied, so accepting it
-    # would park `status` on partial-clean forever — and `REQUIRED_REVIEWERS=codex,grok`
-    # is one token, not two, which is exactly the typo that would do it.
-    *) die "REQUIRED_REVIEWERS: unknown reviewer '$_r' (expected 'codex' and/or 'grok', space-separated)" ;;
-  esac
-done
-unset _r
+# So it is configuration:
+#
+#   codex          (default)  Codex must name HEAD. What a repo that installed
+#                             this skill on its own has.
+#   grok                      Grok must name HEAD.
+#   codex grok                BOTH must — space-separated names are AND.
+#   either  (or any)          ONE of them is enough.
+#
+# `either` is not the same as having no policy. It is the rule a repo running both
+# bots may genuinely want — whoever gets there first has read the code — and
+# without a token for it that policy would have to go back to being inferred from
+# the PR, which is what could not be done in the first place. It stands alone:
+# "either grok" has no coherent reading, so it is rejected rather than guessed at.
+#
+# `${VAR-default}`, not `${VAR:-default}`: an explicitly empty value keeps being
+# empty and is rejected below. The logins above can take the `:-` form because
+# they are cosmetic, but this one decides whether a PR is callable clean, and
+# `REQUIRED_REVIEWERS=` silently becoming `codex` is a policy nobody chose.
+REQUIRED_REVIEWERS="${REQUIRED_REVIEWERS-codex}"
+case "$REQUIRED_REVIEWERS" in
+  either|any) ;;
+  '') die "REQUIRED_REVIEWERS is empty — name at least one reviewer, or use 'either'" ;;
+  *)
+    for _r in $REQUIRED_REVIEWERS; do
+      case "$_r" in
+        codex|grok) ;;
+        either|any) die "REQUIRED_REVIEWERS: '$_r' means one-of and cannot be combined — use it on its own" ;;
+        # Not a warning. An unrecognised name can never be satisfied, so accepting it
+        # would park `status` on partial-clean forever — and `REQUIRED_REVIEWERS=codex,grok`
+        # is one token, not two, which is exactly the typo that would do it.
+        *) die "REQUIRED_REVIEWERS: unknown reviewer '$_r' (expected 'codex', 'grok', or 'either')" ;;
+      esac
+    done
+    unset _r ;;
+esac
 
 # ── Fetch every page as ONE array, then filter ───────────────────────────────
 #
@@ -130,7 +152,8 @@ OPTIONS
 ENVIRONMENT
   CODEX_GROK_REVIEW_CONTEXT  Lines of code context in `detail` (default 12)
   REQUIRED_REVIEWERS         Who must vouch for the newest commit before `status`
-                             exits 0. "codex" (default), "grok", or "codex grok".
+                             exits 0. "codex" (default), "grok", "codex grok"
+                             (both), or "either" (one of them is enough).
   CODEX_LOGIN / GROK_LOGIN   Reviewer logins, if your installation differs
 
 EXIT CODES (status / findings)
@@ -426,21 +449,38 @@ clean_verdicts() {
         ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\\t\\(.who)\"" 2>/dev/null || true
 }
 
-# Which REQUIRED_REVIEWERS have NOT vouched for this commit, as a space-separated
-# list. Empty means every required reviewer posted a clean verdict naming $2.
+# Has $3 filed a clean verdict naming commit $2, given the snapshot $1?
+#
+# Its LATEST verdict, not any of them: an older blessing does not cover code pushed
+# since. Verdicts with no SHA in the body are skipped rather than trusted — they
+# prove a review happened, not which commit it read.
+reviewer_vouched() {
+  local sha
+  sha="$(printf '%s\n' "$1" | awk -F'\t' -v w="$3" '$3 == w && $2 != "" { s = $2 } END { print s }')"
+  [ -n "$sha" ] && [ -n "$2" ] || return 1
+  case "$2" in "$sha"*) return 0 ;; esac
+  return 1
+}
+
+# Who still owes a clean verdict for commit $2, as text for a human. Empty means
+# the REQUIRED_REVIEWERS policy is satisfied.
 #
 # Pure text over a clean_verdicts snapshot already in hand ($1) — no API call, so
-# it cannot disagree with the verdict line rendered beside it. A reviewer counts as
-# missing when it filed no clean verdict at all, or when its LATEST one names some
-# other commit: an older blessing does not cover code pushed since.
+# it cannot disagree with the verdict line rendered beside it.
 missing_reviewers() {
-  local clean="$1" head="$2" who sha out=""
+  local clean="$1" head="$2" who out=""
+  case "$REQUIRED_REVIEWERS" in
+    either|any)
+      # One is enough, so the first hit ends it. Nothing is "missing" by name here;
+      # what is missing is an answer from anybody, which is what the phrase says.
+      for who in codex grok; do
+        reviewer_vouched "$clean" "$head" "$who" && return 0
+      done
+      printf 'codex or grok'
+      return 0 ;;
+  esac
   for who in $REQUIRED_REVIEWERS; do
-    sha="$(printf '%s\n' "$clean" | awk -F'\t' -v w="$who" '$3 == w && $2 != "" { s = $2 } END { print s }')"
-    if [ -n "$sha" ] && [ -n "$head" ]; then
-      case "$head" in "$sha"*) continue ;; esac
-    fi
-    out="${out:+$out }$who"
+    reviewer_vouched "$clean" "$head" "$who" || out="${out:+$out, }$who"
   done
   printf '%s' "$out"
 }
@@ -674,7 +714,7 @@ verdict_for() {
   missing="$(missing_reviewers "$clean" "$head_sha")"
 
   verdict_key "$open" "$total" "$reviews" "$thumbs" "$clean_line" "$matches" \
-    "$clean_sha" "$(issue_open_in "$json")" "$(printf '%s' "$missing" | wc -w)"
+    "$clean_sha" "$(issue_open_in "$json")" "$([ -n "$missing" ] && echo 1 || echo 0)"
 }
 
 print_findings() {
@@ -835,7 +875,7 @@ cmd_status() {
   code=0
   key="$(verdict_key "$open" "$(printf '%s' "$json" | jq 'length')" "$reviews" "$thumbs" \
         "$clean_line" "$clean_matches_head" "$clean_sha" "${issue_open:-0}" \
-        "$(printf '%s' "$missing" | wc -w)")" || code=$?
+        "$([ -n "$missing" ] && echo 1 || echo 0)")" || code=$?
   total="$(printf '%s' "$json" | jq 'length')"
 
   case "$key" in
@@ -853,9 +893,10 @@ cmd_status() {
     clean)
       echo "  VERDICT       : REVIEWED, CLEAN." ;;
     partial-clean)
-      echo "  VERDICT       : PARTIAL CLEAN — ${missing// /, } has not vouched for the newest commit."
-      echo "                  A clean verdict from one reviewer does not answer for another."
-      echo "                  Set REQUIRED_REVIEWERS if that is not the policy you want." ;;
+      echo "  VERDICT       : PARTIAL CLEAN — no clean verdict for the newest commit from:"
+      echo "                  ${missing}."
+      echo "                  REQUIRED_REVIEWERS is \"${REQUIRED_REVIEWERS}\". Use 'either' if one"
+      echo "                  reviewer naming HEAD should be enough." ;;
     inconsistent)
       echo "  VERDICT       : INCONSISTENT — an issue-comment finding is live but the"
       echo "                  finding list is empty. Re-run; do not read this as clean." ;;

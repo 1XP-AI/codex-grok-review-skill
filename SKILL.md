@@ -58,11 +58,11 @@ required reviewer has not vouched · `4` findings all stale.
 5. **Two authors, one reader.** Codex is `chatgpt-codex-connector[bot]`. Grok is
    `1xp-dorami`, and only when the body has `![P0 Badge]`–`![P4 Badge]` or
    `Didn't find any major issues`. An open badge from either author makes `status`
-   exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` only when every
-   reviewer in `REQUIRED_REVIEWERS` (default `codex`) posted a clean verdict naming
-   HEAD; one reviewer's verdict does not answer for another, and a reviewer that is
-   simply absent — down, rate-limited, not installed — looks the same over the API,
-   which is why this is configuration rather than something inferred from the PR.
+   exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` only when the
+   `REQUIRED_REVIEWERS` policy is met: `codex` (default), `grok`, `codex grok` for
+   both, or `either` for one-of. A reviewer that is absent — down, rate-limited, not
+   installed — looks identical over the API to one that has not answered yet, which
+   is why this is configuration rather than something inferred from the PR.
    `@codex review` / `wait` / `request` stay Codex-only.
 
 ## Procedure

@@ -147,8 +147,10 @@ check 'clean_verdicts keeps the reviewed sha' "$got" 'd94a859dde'
 #
 # Pure text over a clean_verdicts snapshot. A reviewer is missing when it filed no
 # clean verdict, or when its latest one names a commit that is not HEAD.
+eval "$(sed -n '/^reviewer_vouched() {/,/^}/p' "$src")"
 eval "$(sed -n '/^missing_reviewers() {/,/^}/p' "$src")"
 grok_only="$(printf '2026-01-01T00:00:00Z\tabc123\tgrok\n')"
+codex_only="$(printf '2026-01-01T00:00:00Z\tabc123\tcodex\n')"
 both="$(printf '2026-01-01T00:00:00Z\tabc123\tcodex\n2026-01-02T00:00:00Z\tabc123\tgrok\n')"
 stale_codex="$(printf '2026-01-01T00:00:00Z\tdeadbee\tcodex\n')"
 
@@ -166,6 +168,39 @@ check 'req grok: grok clean satisfies it'       "$(missing_reviewers "$grok_only
 REQUIRED_REVIEWERS='codex grok'
 check 'req both: grok alone is not enough'      "$(missing_reviewers "$grok_only" abc123def)"   'codex'
 check 'req both: both clean satisfies it'       "$(missing_reviewers "$both" abc123def)"        ''
+
+# `either` — one reviewer naming HEAD is enough.
+#
+# A repo running both bots may genuinely want this: whoever answers first has read
+# the code. Without a token for it the policy is inexpressible, and AND-only would
+# park such a repo at exit 3 every time one bot is rate-limited.
+# shellcheck disable=SC2034
+REQUIRED_REVIEWERS='either'
+check 'either: grok alone satisfies it'    "$(missing_reviewers "$grok_only" abc123def)"  ''
+check 'either: codex alone satisfies it'   "$(missing_reviewers "$codex_only" abc123def)" ''
+check 'either: both satisfies it'          "$(missing_reviewers "$both" abc123def)"       ''
+check 'either: nobody named HEAD'          "$(missing_reviewers "" abc123def)"            'codex or grok'
+check 'either: only a stale codex verdict' "$(missing_reviewers "$stale_codex" abc123def)" 'codex or grok'
+# shellcheck disable=SC2034
+REQUIRED_REVIEWERS='any'
+check 'any is a synonym for either'        "$(missing_reviewers "$grok_only" abc123def)"  ''
+
+# Rejected at startup, before any network call. An unsatisfiable or incoherent
+# policy must not become a `status` that never returns 0.
+reject() {
+  local name="$1" value="$2" want="$3" got
+  got="$(REQUIRED_REVIEWERS="$value" bash "$src" -h 2>&1 >/dev/null | head -1)"
+  case "$got" in *"$want"*) check "$name" 'rejected' 'rejected' ;;
+                 *) check "$name" "${got:-<no error>}" "…$want…" ;; esac
+}
+reject 'comma form is one token, not two' 'codex,grok' 'unknown reviewer'
+reject 'an unknown name'                  'bogus'      'unknown reviewer'
+reject 'either cannot be combined'        'either grok' 'cannot be combined'
+reject 'empty names nobody'               ''           'is empty'
+# `either` itself must get PAST validation — it may still fail later for want of a
+# real repo, but never with a REQUIRED_REVIEWERS complaint.
+got="$(REQUIRED_REVIEWERS='either' bash "$src" -h 2>&1 >/dev/null | grep -c REQUIRED_REVIEWERS || true)"
+check 'either passes validation' "$got" '0'
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
