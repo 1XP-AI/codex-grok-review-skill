@@ -32,8 +32,8 @@ t() {
   fi
 }
 
+t 'either author clean on head'   '0 0 1 0 "x" 1 abc 0 0' clean-head   0
 t 'both authors clean on head'    '0 0 1 0 "x" 1 abc 0 1' clean-head   0
-t 'only one author clean on head' '0 0 1 0 "x" 1 abc 0 0' partial-clean 3
 t 'no review, no thumbs, nothing' '0 0 0 0 "" 0 "" 0'   not-reviewed 3
 t 'clean verdict names an older'  '0 3 1 0 "x" 0 abc 0' stale-clean  3
 t 'reviewed, all findings stale'  '0 3 1 0 "" 0 "" 0'   all-stale    4

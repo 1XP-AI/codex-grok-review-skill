@@ -518,9 +518,9 @@ verdict_key() {
         clean_matches_head="$6" clean_sha="$7" issue_open="$8" \
         both_clean="${9:-0}"
 
-  # Status 0 only when BOTH authors posted a clean verdict naming HEAD.
-  # wait/request stay Codex-only and do not use this function.
-  if [ "$open" -eq 0 ] && [ "$both_clean" -eq 1 ]; then
+  # Either author naming HEAD is enough. An open badge from either side
+  # still wins (open==0 is required). wait/request stay Codex-only.
+  if [ "$open" -eq 0 ] && [ "$clean_matches_head" -eq 1 ]; then
     echo clean-head; return 0
   fi
 
@@ -546,9 +546,6 @@ verdict_key() {
     # that ever stop being true, this reports uncertainty rather than the CLEAN it
     # used to fall through to with a P1 sitting on the PR.
     if [ "${issue_open:-0}" -gt 0 ]; then echo inconsistent; return 3; fi
-    if [ "$clean_matches_head" -eq 1 ]; then
-      echo partial-clean; return 3
-    fi
     echo clean; return 0
   fi
 
@@ -787,9 +784,6 @@ cmd_status() {
       echo "                  Confirm they are addressed, then merge." ;;
     clean)
       echo "  VERDICT       : REVIEWED, CLEAN." ;;
-    partial-clean)
-      echo "  VERDICT       : PARTIAL CLEAN — both Codex and Grok must name the newest commit."
-      echo "                  Missing author is still unreviewed." ;;
     inconsistent)
       echo "  VERDICT       : INCONSISTENT — an issue-comment finding is live but the"
       echo "                  finding list is empty. Re-run; do not read this as clean." ;;

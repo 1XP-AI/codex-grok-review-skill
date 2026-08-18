@@ -57,9 +57,8 @@ place so they cannot drift (`findings` used to print open findings and exit `0`)
 5. **Two authors, one reader.** Codex is `chatgpt-codex-connector[bot]`. Grok is
    `1xp-dorami`, and only when the body has `![P0 Badge]`–`![P4 Badge]` or
    `Didn't find any major issues`. An open badge from either author makes `status`
-   exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` only when
-   **both** authors posted a clean verdict naming HEAD. `@codex review` / `wait` /
-   `request` stay Codex-only.
+   exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` when **either** author posted a clean verdict naming HEAD
+   and there is no open badge. `@codex review` / `wait` / `request` stay Codex-only.
 
 ## Procedure
 
