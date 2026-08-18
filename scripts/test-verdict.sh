@@ -20,7 +20,7 @@ fn="$(sed -n '/^verdict_key() {/,/^}/p' "$src")"
 eval "$fn"
 
 pass=0; fail=0
-# name | open total reviews thumbs clean_line matches clean_sha issue | key | code
+# name | open total reviews thumbs clean_line matches clean_sha issue missing | key | code
 t() {
   local name="$1" args="$2" want_k="$3" want_c="$4" k c
   k="$(eval "verdict_key $args")"; c=$?
@@ -32,7 +32,16 @@ t() {
   fi
 }
 
-t 'clean verdict names head'      '0 0 1 0 "x" 1 abc 0' clean-head   0
+t 'clean verdict names head'      '0 0 1 0 "x" 1 abc 0 0' clean-head   0
+# REQUIRED_REVIEWERS. A clean verdict naming HEAD is only enough when every
+# required reviewer posted one. Observed on PR #4 of this repo: Codex hit its
+# usage limit and posted nothing, Grok posted a clean naming HEAD, and this
+# answered clean-head/0 for code Codex had never read.
+t 'a required reviewer has not vouched' '0 0 1 0 "x" 1 abc 0 1' partial-clean 3
+# Only the head-clean branch is gated. A review that left a 👍 and no clean
+# comment still reports clean/0 — a reaction names no commit, so there is no
+# verdict for anyone to be missing from, and gating it would break that path.
+t 'missing does not touch the thumbs path' '0 0 1 1 "" 0 "" 0 1' clean        0
 t 'no review, no thumbs, nothing' '0 0 0 0 "" 0 "" 0'   not-reviewed 3
 t 'clean verdict names an older'  '0 3 1 0 "x" 0 abc 0' stale-clean  3
 t 'reviewed, all findings stale'  '0 3 1 0 "" 0 "" 0'   all-stale    4
@@ -52,7 +61,10 @@ t 'stale issue finding, no review' '0 1 0 0 "" 0 "" 0'   all-stale    4
 t 'live issue finding, empty list'  '0 0 0 0 "" 0 "" 1'   inconsistent 3
 # open beats a clean verdict: a later review can file against the same commit an
 # earlier one blessed.
-t 'open outranks a head-clean'    '2 5 1 0 "x" 1 abc 0' open         2
+t 'open outranks a head-clean'    '2 5 1 0 "x" 1 abc 0 0' open         2
+# ...and outranks a partial clean too: an open badge is worse news than a
+# reviewer who has not answered yet.
+t 'open outranks a partial clean'  '2 5 1 0 "x" 1 abc 0 1' open         2
 # Mixed Codex+Grok thread: a clean verdict naming HEAD must not cover an
 # open Grok finding. Either author's open badge makes status 2, not 0.
 t 'mixed Codex clean + Grok P2'   '1 1 1 0 "x" 1 abc 1' open         2

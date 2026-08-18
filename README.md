@@ -81,8 +81,10 @@ Grok Review: Didn't find any major issues. 🚀
 
 A random `1xp-dorami` comment is **not** a review. Require `![P0 Badge]`–`![P4 Badge]`
 or `Didn't find any major issues`. An open badge from either author makes `status`
-exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` when **either** author posted a clean verdict naming HEAD
-and there is no open badge. `wait` / `request` stay Codex-only.
+exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` only when every
+reviewer in `REQUIRED_REVIEWERS` (default `codex`) posted a clean verdict naming HEAD
+and there is no open badge; a verdict from one reviewer does not answer for another.
+`wait` / `request` stay Codex-only.
 
 So **"zero reviews" is ambiguous** — it means either *not reviewed yet* or *reviewed
 and clean*. Miss this and you either wait forever for a review that will never come,
@@ -269,7 +271,7 @@ Add `--repo OWNER/REPO` outside a checkout.
 |---:|---|
 | 0 | Reviewed, no open findings |
 | 2 | Open findings exist |
-| 3 | Not reviewed yet, **or** the clean verdict names an older commit |
+| 3 | Not reviewed yet, **or** the clean verdict names an older commit, **or** a required reviewer has not vouched for HEAD |
 | 4 | Reviewed; all findings stale/outdated — confirm they were addressed |
 
 ```bash
@@ -388,3 +390,36 @@ the command you ran and its output. Reviewer logins come from `CODEX_LOGIN`
 override either in the environment. Grok comments count only when the body looks
 like a review. `@codex review` / `wait` / `request` stay Codex-only. Severity
 badges are `P0`–`P4`.
+
+### `REQUIRED_REVIEWERS`
+
+Who has to vouch for the newest commit before `status` exits `0`. Space-separated,
+`codex` and/or `grok`; the default is `codex`.
+
+```bash
+REQUIRED_REVIEWERS="codex grok" codex-grok-review status 123
+```
+
+This is configuration rather than something read off the PR, because the PR cannot
+tell you. "Grok is not installed here" and "Grok has not answered yet" look
+identical over the API — no comment, no review, no reaction — so any rule derived
+from PR data alone has to guess one and be wrong about the other. Requiring both
+unconditionally breaks every Codex-only repository; requiring either lets one
+reviewer's clean verdict stand in for a reviewer that never ran.
+
+That second failure is not hypothetical. On PR #4 of this repo, Codex hit its usage
+limit and posted nothing, Grok posted a clean verdict naming HEAD, and `status`
+answered `REVIEWED, CLEAN` / `0` for code Codex had never read. With
+`REQUIRED_REVIEWERS=codex` that PR reports:
+
+```
+  required      : codex  (awaiting: codex)
+  VERDICT       : PARTIAL CLEAN — codex has not vouched for the newest commit.
+```
+
+and exits `3`, so a `status && merge` gate holds until Codex actually answers.
+
+An unknown name is rejected at startup rather than warned about: it could never be
+satisfied, so it would park `status` on `partial-clean` forever — and
+`REQUIRED_REVIEWERS=codex,grok` is one token, not two, which is exactly the typo
+that would do it.

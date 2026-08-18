@@ -118,5 +118,54 @@ ask 'empty-body Grok review fails is_reviewer' "$grok_review_obj"  'is_reviewer'
 ask 'empty-body Codex review is still Codex'   "$codex_review_obj" '.user.login | is_codex' 'true'
 ask 'Grok review object is not Codex'          "$grok_review_obj"  '.user.login | is_codex' 'false'
 
+# --- clean_verdicts runs for real, against a stubbed fetch ---------------------
+#
+# The function is sourced and its ONE network call is stubbed, so the actual jq
+# program runs. That matters: `clean_verdicts` swallows jq errors
+# (`2>/dev/null || true`), so a program that fails to compile returns an empty
+# list and reads as "no clean verdict" — indistinguishable from a real answer.
+#
+# It did. `$who` sat unescaped inside a double-quoted jq program, so the SHELL
+# expanded it before jq ever saw it: `who=codex` compiled to `if codex == "codex"`,
+# jq answered `codex/0 is not defined`, and the caller got nothing. `wait` reads
+# `clean_verdicts <repo> <pr> codex` as its strongest exit signal, so that signal
+# was dead. Asserting on output rather than on exit status is what pins it.
+eval "$(sed -n '/^clean_verdicts() {/,/^}/p' "$src")"
+FIXTURES='['"$codex_clean"','"$grok_clean"','"$grok_p2"','"$noise"']'
+api_all() { printf '%s' "$FIXTURES"; }
+
+got="$(clean_verdicts fake-repo 1 | cut -f3 | paste -sd, -)"
+check 'clean_verdicts all  -> both authors' "$got" 'codex,grok'
+got="$(clean_verdicts fake-repo 1 codex | cut -f3 | paste -sd, -)"
+check 'clean_verdicts codex -> codex only'  "$got" 'codex'
+got="$(clean_verdicts fake-repo 1 grok | cut -f3 | paste -sd, -)"
+check 'clean_verdicts grok  -> grok only'   "$got" 'grok'
+got="$(clean_verdicts fake-repo 1 codex | cut -f2)"
+check 'clean_verdicts keeps the reviewed sha' "$got" 'd94a859dde'
+
+# --- REQUIRED_REVIEWERS: who still owes a verdict ------------------------------
+#
+# Pure text over a clean_verdicts snapshot. A reviewer is missing when it filed no
+# clean verdict, or when its latest one names a commit that is not HEAD.
+eval "$(sed -n '/^missing_reviewers() {/,/^}/p' "$src")"
+grok_only="$(printf '2026-01-01T00:00:00Z\tabc123\tgrok\n')"
+both="$(printf '2026-01-01T00:00:00Z\tabc123\tcodex\n2026-01-02T00:00:00Z\tabc123\tgrok\n')"
+stale_codex="$(printf '2026-01-01T00:00:00Z\tdeadbee\tcodex\n')"
+
+# missing_reviewers reads REQUIRED_REVIEWERS as a global. It is defined by the eval
+# above, which shellcheck cannot see through, so every assignment here looks unused.
+# shellcheck disable=SC2034
+REQUIRED_REVIEWERS='codex'
+check 'req codex: grok-only clean leaves codex' "$(missing_reviewers "$grok_only" abc123def)"   'codex'
+check 'req codex: codex clean on an older sha'  "$(missing_reviewers "$stale_codex" abc123def)" 'codex'
+check 'req codex: no verdicts at all'           "$(missing_reviewers "" abc123def)"             'codex'
+# shellcheck disable=SC2034
+REQUIRED_REVIEWERS='grok'
+check 'req grok: grok clean satisfies it'       "$(missing_reviewers "$grok_only" abc123def)"   ''
+# shellcheck disable=SC2034
+REQUIRED_REVIEWERS='codex grok'
+check 'req both: grok alone is not enough'      "$(missing_reviewers "$grok_only" abc123def)"   'codex'
+check 'req both: both clean satisfies it'       "$(missing_reviewers "$both" abc123def)"        ''
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

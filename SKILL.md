@@ -27,7 +27,8 @@ Needs `gh` 2.44+ (for `api --slurp`); an older one is refused with a message.
 
 Exit codes for `status` / `findings` — the same codes from both, decided in one
 place so they cannot drift (`findings` used to print open findings and exit `0`):
-`0` reviewed & clean · `2` open findings · `3` not reviewed yet · `4` findings all stale.
+`0` reviewed & clean · `2` open findings · `3` not reviewed / stale verdict / a
+required reviewer has not vouched · `4` findings all stale.
 
 ## What goes wrong without this
 
@@ -57,8 +58,12 @@ place so they cannot drift (`findings` used to print open findings and exit `0`)
 5. **Two authors, one reader.** Codex is `chatgpt-codex-connector[bot]`. Grok is
    `1xp-dorami`, and only when the body has `![P0 Badge]`–`![P4 Badge]` or
    `Didn't find any major issues`. An open badge from either author makes `status`
-   exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` when **either** author posted a clean verdict naming HEAD
-   and there is no open badge. `@codex review` / `wait` / `request` stay Codex-only.
+   exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` only when every
+   reviewer in `REQUIRED_REVIEWERS` (default `codex`) posted a clean verdict naming
+   HEAD; one reviewer's verdict does not answer for another, and a reviewer that is
+   simply absent — down, rate-limited, not installed — looks the same over the API,
+   which is why this is configuration rather than something inferred from the PR.
+   `@codex review` / `wait` / `request` stay Codex-only.
 
 ## Procedure
 

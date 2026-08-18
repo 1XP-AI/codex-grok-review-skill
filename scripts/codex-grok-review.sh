@@ -48,6 +48,30 @@ JQ_REVIEWER_LIB="$(jq_reviewer_lib)"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# Which reviewers have to vouch for the newest commit before `status` says 0.
+#
+# This cannot be read off the PR. "Grok is not installed here" and "Grok has not
+# answered yet" look identical over the API — no comment, no review, no reaction —
+# so a rule derived from PR data alone has to pick one and be wrong about the
+# other. Requiring BOTH broke every Codex-only repository; requiring EITHER let a
+# Grok clean stand in for a Codex that never looked. Observed on PR #4 of this
+# repo: Codex hit its usage limit and posted nothing, Grok posted a clean naming
+# HEAD, and `status` answered REVIEWED, CLEAN / 0 for code Codex had not read.
+#
+# So it is configuration. The default is `codex`, which is what a repository that
+# installed this skill has; a repo running both sets "codex grok".
+REQUIRED_REVIEWERS="${REQUIRED_REVIEWERS:-codex}"
+for _r in $REQUIRED_REVIEWERS; do
+  case "$_r" in
+    codex|grok) ;;
+    # Not a warning. An unrecognised name can never be satisfied, so accepting it
+    # would park `status` on partial-clean forever — and `REQUIRED_REVIEWERS=codex,grok`
+    # is one token, not two, which is exactly the typo that would do it.
+    *) die "REQUIRED_REVIEWERS: unknown reviewer '$_r' (expected 'codex' and/or 'grok', space-separated)" ;;
+  esac
+done
+unset _r
+
 # ── Fetch every page as ONE array, then filter ───────────────────────────────
 #
 # `gh api --paginate --jq EXPR` runs EXPR against each page SEPARATELY and prints
@@ -105,10 +129,13 @@ OPTIONS
 
 ENVIRONMENT
   CODEX_GROK_REVIEW_CONTEXT  Lines of code context in `detail` (default 12)
+  REQUIRED_REVIEWERS         Who must vouch for the newest commit before `status`
+                             exits 0. "codex" (default), "grok", or "codex grok".
+  CODEX_LOGIN / GROK_LOGIN   Reviewer logins, if your installation differs
 
 EXIT CODES (status / findings)
   0  reviewed, no open findings          2  open findings exist
-  3  not reviewed yet                    4  reviewed, but findings are stale-only
+  3  not reviewed / stale / partial      4  reviewed, but findings are stale-only
 
 EXAMPLES
   codex-grok-review status 123
@@ -377,19 +404,45 @@ has_thumbsup() {
 #
 # The sign-off wanders ("Bravo.", "Breezy!", "Keep them coming!", …), so never match
 # on it. The `Reviewed commit` hash is the valuable part: unlike a 👍 reaction, it
-# proves WHICH commit was reviewed. Emits "<iso8601>\t<sha>" per clean verdict.
+# proves WHICH commit was reviewed. Emits "<iso8601>\t<sha>\t<who>" per verdict.
 # $3 = all|codex|grok (default all). wait stays Codex-only.
+#
+# The third column is what lets `missing_reviewers` answer per author from ONE
+# fetch. Asking clean_verdicts once per reviewer would re-read every issue comment
+# on the PR each time, and three reads of the same endpoint can disagree with each
+# other — the split-snapshot bug `issue_open_in` exists to avoid.
 clean_verdicts() {
   local who="${3:-all}"
   api_all "repos/$1/issues/$2/comments" | jq -r --arg who "$who" "${JQ_REVIEWER_LIB}[ .[]
           | select(is_reviewer)
           | select(.body | is_clean_body)
           | select(
-              if $who == \"codex\" then (.user.login | is_codex)
-              elif $who == \"grok\" then (.user.login | is_grok)
+              if \$who == \"codex\" then (.user.login | is_codex)
+              elif \$who == \"grok\" then (.user.login | is_grok)
               else true end)
-          | { created_at, sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
-        ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\"" 2>/dev/null || true
+          | { created_at,
+              sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\"),
+              who: (if (.user.login | is_codex) then \"codex\" else \"grok\" end) }
+        ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\\t\\(.who)\"" 2>/dev/null || true
+}
+
+# Which REQUIRED_REVIEWERS have NOT vouched for this commit, as a space-separated
+# list. Empty means every required reviewer posted a clean verdict naming $2.
+#
+# Pure text over a clean_verdicts snapshot already in hand ($1) — no API call, so
+# it cannot disagree with the verdict line rendered beside it. A reviewer counts as
+# missing when it filed no clean verdict at all, or when its LATEST one names some
+# other commit: an older blessing does not cover code pushed since.
+missing_reviewers() {
+  local clean="$1" head="$2" who sha out=""
+  for who in $REQUIRED_REVIEWERS; do
+    sha="$(printf '%s\n' "$clean" | awk -F'\t' -v w="$who" '$3 == w && $2 != "" { s = $2 } END { print s }')"
+    if [ -n "$sha" ] && [ -n "$head" ]; then
+      case "$head" in "$sha"*) continue ;; esac
+    fi
+    out="${out:+$out }$who"
+  done
+  printf '%s' "$out"
 }
 
 # Has any Codex review stated THIS head commit as the one it reviewed?
@@ -524,12 +577,21 @@ cmd_json() {
 # Echoes a key; returns the exit code that goes with it.
 verdict_key() {
   local open="$1" total="$2" reviews="$3" thumbs="$4" clean_line="$5" \
-        clean_matches_head="$6" clean_sha="$7" issue_open="$8"
+        clean_matches_head="$6" clean_sha="$7" issue_open="$8" \
+        missing_required="${9:-0}"
 
-  # Either author naming HEAD is enough. An open badge from either side
-  # still wins (open==0 is required). wait/request stay Codex-only.
+  # A clean verdict naming the newest commit is still the strongest signal — but
+  # WHOSE clean verdict decides whether it is enough. Every REQUIRED_REVIEWERS
+  # entry has to have named this commit; a Grok clean does not answer for a Codex
+  # that never ran. An open badge from either author outranks both (open==0 is
+  # required to get here). wait/request stay Codex-only and do not use this.
+  #
+  # Only this branch is gated. Below it nothing consults missing_required, so the
+  # 👍 path — a review with no clean comment at all — keeps reporting `clean`
+  # exactly as before; a reaction carries no commit for anyone to be missing from.
   if [ "$open" -eq 0 ] && [ "$clean_matches_head" -eq 1 ]; then
-    echo clean-head; return 0
+    if [ "$missing_required" -eq 0 ]; then echo clean-head; return 0; fi
+    echo partial-clean; return 3
   fi
 
   # `total`, not just `issue_open`. An issue-comment finding leaves no review
@@ -596,7 +658,7 @@ fetch_findings_settled() {
 # input cannot be added to one and forgotten in the other.
 verdict_for() {
   local repo="$1" pr="$2" head_sha="$3" json="$4" reviews="$5"
-  local open total thumbs clean clean_line clean_sha matches
+  local open total thumbs clean clean_line clean_sha matches missing
 
   open="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)] | length')"
   total="$(printf '%s' "$json" | jq 'length')"
@@ -608,9 +670,11 @@ verdict_for() {
   if [ -n "$clean_sha" ] && [ -n "$head_sha" ]; then
     case "$head_sha" in "$clean_sha"*) matches=1 ;; esac
   fi
+  # Counted off the snapshot already fetched, never re-read — see missing_reviewers.
+  missing="$(missing_reviewers "$clean" "$head_sha")"
 
   verdict_key "$open" "$total" "$reviews" "$thumbs" "$clean_line" "$matches" \
-    "$clean_sha" "$(issue_open_in "$json")"
+    "$clean_sha" "$(issue_open_in "$json")" "$(printf '%s' "$missing" | wc -w)"
 }
 
 print_findings() {
@@ -718,7 +782,7 @@ cmd_detail() {
 
 cmd_status() {
   local repo pr head head_sha json open blocking reviews thumbs latest issue_open
-  local clean clean_line clean_sha clean_at clean_matches_head sev_counts
+  local clean clean_line clean_sha clean_at clean_matches_head sev_counts missing
   repo="$(resolve_repo)"; pr="$1"
   head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   # BEFORE the findings, and read once. A review landing between the two reads
@@ -747,6 +811,8 @@ cmd_status() {
   if [ -n "$clean_sha" ] && [ -n "$head_sha" ] && case "$head_sha" in "$clean_sha"*) true ;; *) false ;; esac; then
     clean_matches_head=1
   fi
+  # Same snapshot as the verdict line above, so the two cannot disagree.
+  missing="$(missing_reviewers "$clean" "$head_sha")"
 
   echo "PR #$pr  ($repo)"
   echo "  newest commit : ${head:-unknown}  ${head_sha:0:10}"
@@ -759,13 +825,17 @@ cmd_status() {
   else
     echo "  clean verdict : none"
   fi
+  # Named, not just counted: "which reviewer still owes a verdict" is the whole
+  # question this line answers, and the answer is what you act on.
+  echo "  required      : ${REQUIRED_REVIEWERS}${missing:+  (awaiting: $missing)}"
   echo "  open findings : $open${sev_counts:+  ($sev_counts)}"
 
   # The decision itself lives in verdict_key. Everything below renders it.
   local key code total
   code=0
   key="$(verdict_key "$open" "$(printf '%s' "$json" | jq 'length')" "$reviews" "$thumbs" \
-        "$clean_line" "$clean_matches_head" "$clean_sha" "${issue_open:-0}")" || code=$?
+        "$clean_line" "$clean_matches_head" "$clean_sha" "${issue_open:-0}" \
+        "$(printf '%s' "$missing" | wc -w)")" || code=$?
   total="$(printf '%s' "$json" | jq 'length')"
 
   case "$key" in
@@ -782,6 +852,10 @@ cmd_status() {
       echo "                  Confirm they are addressed, then merge." ;;
     clean)
       echo "  VERDICT       : REVIEWED, CLEAN." ;;
+    partial-clean)
+      echo "  VERDICT       : PARTIAL CLEAN — ${missing// /, } has not vouched for the newest commit."
+      echo "                  A clean verdict from one reviewer does not answer for another."
+      echo "                  Set REQUIRED_REVIEWERS if that is not the policy you want." ;;
     inconsistent)
       echo "  VERDICT       : INCONSISTENT — an issue-comment finding is live but the"
       echo "                  finding list is empty. Re-run; do not read this as clean." ;;
