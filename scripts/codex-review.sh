@@ -18,19 +18,30 @@ GROK_LOGIN="${GROK_LOGIN:-1xp-dorami}"
 
 # jq library spliced into every comment/review filter.
 # Built from CODEX_LOGIN / GROK_LOGIN so the two cannot drift.
+# is_badge_body     — carries a P0–P4 severity badge
+# is_clean_body     — carries the "no major issues" verdict phrase
+# is_review_body    — either of the two: this comment is review output, not chatter
 # is_reviewer       — Codex login, or Grok login with a review-shaped body
 # is_finding_author — Codex login, or Grok login with a P-badge (clean != finding)
+#
+# The two body shapes are defs rather than inline regexes because they are each
+# tested from more than one call site. `clean_verdicts` used to spell the phrase
+# `[Dd]idn't` while `is_review_body` spelled it `[Dd]idn.t`, so a curly apostrophe
+# passed the reviewer gate and then vanished from the verdict list — the comment
+# counted as a review that had produced nothing. One def, one spelling.
 jq_reviewer_lib() {
   cat <<EOF
 def is_codex: startswith("${CODEX_LOGIN}");
 def is_grok: . == "${GROK_LOGIN}";
-def is_review_body: test("!\\\[P[0-9] Badge\\\]") or test("[Dd]idn.t find any major issues");
+def is_badge_body: test("!\\\[P[0-9] Badge\\\]");
+def is_clean_body: test("[Dd]idn.t find any major issues");
+def is_review_body: is_badge_body or is_clean_body;
 def is_reviewer:
   (.user.login | is_codex)
   or ((.user.login | is_grok) and (.body // "" | is_review_body));
 def is_finding_author:
   (.user.login | is_codex)
-  or ((.user.login | is_grok) and (.body // "" | test("!\\\[P[0-9] Badge\\\]")));
+  or ((.user.login | is_grok) and (.body // "" | is_badge_body));
 EOF
 }
 JQ_REVIEWER_LIB="$(jq_reviewer_lib)"
@@ -372,7 +383,7 @@ clean_verdicts() {
   local who="${3:-all}"
   api_all "repos/$1/issues/$2/comments" | jq -r --arg who "$who" "${JQ_REVIEWER_LIB}[ .[]
           | select(is_reviewer)
-          | select(.body | test(\"[Dd]idn't find any major issues\"))
+          | select(.body | is_clean_body)
           | select(
               if $who == \"codex\" then (.user.login | is_codex)
               elif $who == \"grok\" then (.user.login | is_grok)
@@ -457,8 +468,16 @@ head_commit_sha() {
   printf '%s' "$sha"
 }
 
+# The reviews endpoint is a CODEX-ONLY signal, and `is_codex` — not `is_reviewer` —
+# is the predicate for it. `is_reviewer` gates Grok on the comment BODY, but a review
+# object that carries only inline comments has `body: ""`, so every Grok review would
+# fail that gate and this would report 0. Widening the gate is worse: without the body
+# check a stray `1xp-dorami` review object counts as a review, which is the false
+# "reviewed" this tool exists to prevent. Grok's evidence reaches `verdict_key` by the
+# routes it actually uses — findings (`total`) and clean verdicts (`clean_line`) — so
+# nothing is lost by reading this endpoint for Codex alone. `review_shas` does the same.
 review_count() {
-  api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[.[] | select(is_reviewer)] | length" 2>/dev/null || echo 0
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[.[] | select(.user.login | is_codex)] | length" 2>/dev/null || echo 0
 }
 
 # The fingerprint `wait` settles on: everything Codex has posted, both ways.
@@ -481,11 +500,12 @@ activity_stamp() {
            | "\(length):\(max // "")"' 2>/dev/null)"
 }
 
+# Codex-only for the same reason as review_count above — and here it also matters
+# that the value feeds `activity_stamp`, which only `wait` reads, and `wait` is
+# Codex-only by design.
 latest_review_date() {
-  api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[.[] | select(is_reviewer) | .submitted_at] | max // \"\"" 2>/dev/null
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[.[] | select(.user.login | is_codex) | .submitted_at] | max // \"\"" 2>/dev/null
 }
-
-sev_rank() { case "$1" in P0) echo 0;; P1) echo 1;; P2) echo 2;; P3) echo 3;; P4) echo 4;; *) echo 9;; esac; }
 
 cmd_json() {
   local repo pr head head_sha

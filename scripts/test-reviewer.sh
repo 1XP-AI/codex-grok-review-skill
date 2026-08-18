@@ -80,5 +80,43 @@ check 'Grok P4 severity from badge alt' "$got" 'P4'
 got="$(printf '%s' "$grok_clean" | jq -r '.body | capture("Reviewed commit:\\*\\*\\s*`(?<s>[0-9a-f]+)`") | .s')"
 check 'Grok clean SHA from Reviewed commit' "$got" 'd94a859dde'
 
+# --- one spelling of the clean phrase ----------------------------------------
+#
+# The reviewer gate and the clean-verdict filter used to spell the apostrophe
+# differently: `[Dd]idn.t` admitted a curly one, `[Dd]idn't` did not. A comment
+# with a typographic apostrophe therefore counted as a review and then produced
+# no verdict — "reviewed, nothing filed", which reads as CLEAN. Both now go
+# through is_clean_body, so the two answers cannot disagree again.
+# U+2019 is built at runtime, not typed: a literal curly quote in shell source
+# trips shellcheck SC1112, and this file has to stay lint-clean to run in CI.
+rsquo="$(printf '\u2019')"
+curly='{"user":{"login":"1xp-dorami"},"body":"Grok Review: Didn'"$rsquo"'t find any major issues.\n\n**Reviewed commit:** `d94a859dde`"}'
+ask 'curly apostrophe is a clean body'    "$curly"      '.body | is_clean_body' 'true'
+ask 'curly apostrophe is a reviewer'      "$curly"      'is_reviewer'           'true'
+ask 'straight apostrophe is a clean body' "$grok_clean" '.body | is_clean_body' 'true'
+ask 'a P-badge alone is not a clean body' "$grok_p2"    '.body | is_clean_body' 'false'
+ask 'chatter is not a clean body'         "$noise"      '.body | is_clean_body' 'false'
+# The invariant behind the shared def: a body that reads as a clean verdict must
+# also read as review output. Break it and a Grok clean verdict stops being a
+# reviewer at all, which is the same silent hole from the other direction.
+for fx in "$codex_clean" "$grok_clean" "$curly" "$grok_p2" "$noise" "$other"; do
+  got="$(printf '%s' "$fx" | jq -r "${JQ_REVIEWER_LIB}"'.body
+    | (is_clean_body | not) or is_review_body')"
+  check 'clean body implies review body' "$got" 'true'
+done
+
+# --- the reviews endpoint is read Codex-only ---------------------------------
+#
+# review_count / latest_review_date / review_shas select on `is_codex`, not
+# `is_reviewer`. This pins WHY: a review object carrying only inline comments has
+# an empty body, so the body-shaped gate would drop it. Widening the gate instead
+# would let a stray Grok review object count as a review — the false "reviewed"
+# this tool exists to prevent.
+grok_review_obj='{"user":{"login":"1xp-dorami"},"body":"","submitted_at":"2026-01-01T00:00:00Z"}'
+codex_review_obj='{"user":{"login":"chatgpt-codex-connector[bot]"},"body":"**Reviewed commit:** `d94a859dde`","submitted_at":"2026-01-01T00:00:00Z"}'
+ask 'empty-body Grok review fails is_reviewer' "$grok_review_obj"  'is_reviewer'            'false'
+ask 'empty-body Codex review is still Codex'   "$codex_review_obj" '.user.login | is_codex' 'true'
+ask 'Grok review object is not Codex'          "$grok_review_obj"  '.user.login | is_codex' 'false'
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

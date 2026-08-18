@@ -30,3 +30,6 @@ jobs:
 
       - name: snapshot ordering
         run: bash scripts/test-snapshot.sh
+
+      - name: reviewer predicate
+        run: bash scripts/test-reviewer.sh
