@@ -56,8 +56,16 @@ composing `gh` calls by hand.
      "First match" only works once that footer is out of the way, though: on a body with
      **no** code permalink the citation is the first match, so the finding gets located in
      AGENTS.md and dated by the cited commit — not HEAD, so it reads STALE and drops out
-     of the gate exactly as being deleted would. Strip from `\breference:` onward before
-     searching, and keep the line in the rationale as provenance.
+     of the gate exactly as being deleted would.
+   - Separate them by **position, not by label or filename**: search only the part of the
+     body *before the badge*. The code permalink precedes the badge and the citation
+     follows the rationale, so the cut is structural. Keying on the `reference:` label was
+     measured to fail three ways — a capital `Reference:`, a bare `See [...](...)` with no
+     label, and any wording a future template picks. Keying on the filename fails
+     differently: the cited file is whatever rules file the repo keeps, and a finding may
+     legitimately be *about* `AGENTS.md`. The cost is that a code permalink appearing only
+     after the badge is not read as a location either — which leaves an unlocated, live
+     finding, the direction that blocks a merge rather than hiding one.
 
 2. **Never strip markdown from a finding before reading its severity.** The
    `P0`–`P4` level is a badge image at the start of the body:

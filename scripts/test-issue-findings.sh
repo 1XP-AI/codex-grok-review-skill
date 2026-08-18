@@ -41,7 +41,7 @@ check() {
 
 # --- fixtures ---------------------------------------------------------------
 #
-# Ten issue comments; seven of them are findings. The permalink-less pair is
+# Fourteen issue comments; eleven of them are findings. The permalink-less pair is
 # the regression guard, id 4 is the heading shape it exposed, and id 10 is the
 # body whose only blob link is a rule citation.
 HEAD_SHA='cf125d41c7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -86,7 +86,23 @@ FIXTURE="$(cat <<'JSON'
 
   { "id": 10, "created_at": "2026-08-18T00:12:00Z", "html_url": "u10",
     "user": { "login": "1xp-dorami" },
-    "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Cite-only, no code link**\n\nThe path is dereferenced before the check.\n\nAGENTS.md reference: [AGENTS.md:L327-L335](https://github.com/O/R/blob/deadbee1234/AGENTS.md#L327-L335)" }
+    "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Cite-only, no code link**\n\nThe path is dereferenced before the check.\n\nAGENTS.md reference: [AGENTS.md:L327-L335](https://github.com/O/R/blob/deadbee1234/AGENTS.md#L327-L335)" },
+
+  { "id": 11, "created_at": "2026-08-18T00:13:00Z", "html_url": "u11",
+    "user": { "login": "1xp-dorami" },
+    "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Capital R on the label**\n\nOne paragraph.\n\nReference: [AGENTS.md:L327-L335](https://github.com/O/R/blob/deadbee1234/AGENTS.md#L327-L335)" },
+
+  { "id": 12, "created_at": "2026-08-18T00:14:00Z", "html_url": "u12",
+    "user": { "login": "1xp-dorami" },
+    "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  No label at all**\n\nOne paragraph.\n\nSee [AGENTS.md:L327](https://github.com/O/R/blob/deadbee1234/AGENTS.md#L327)" },
+
+  { "id": 13, "created_at": "2026-08-18T00:15:00Z", "html_url": "u13",
+    "user": { "login": "chatgpt-codex-connector[bot]" },
+    "body": "**<sub><sub>![P3 Badge](https://img.shields.io/badge/P3-blue?style=flat)</sub></sub>  A rules file that is not AGENTS.md**\n\nOne paragraph.\n\nSKILL.md reference: [SKILL.md:L12](https://github.com/O/R/blob/deadbee1234/SKILL.md#L12)" },
+
+  { "id": 14, "created_at": "2026-08-18T00:16:00Z", "html_url": "u14",
+    "user": { "login": "chatgpt-codex-connector[bot]" },
+    "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Code link only AFTER the badge**\n\nOne paragraph.\n\nhttps://github.com/O/R/blob/cf125d41c7/src/after.ts#L5" }
 ]
 JSON
 )"
@@ -137,8 +153,23 @@ check 'cite stays in the rationale'                  "$(by 10 '.rationale | test
 # code permalink first and a citation naming a DIFFERENT commit.
 check 'code permalink still beats the cite'          "$(by 1 '.path')|$(by 1 '.reviewed_sha')" 'packages/api/src/routes/auth.ts|cf125d41c7'
 
+# The label is not the defense — POSITION is. A docs cite sits after the badge
+# whatever it is called, so cutting at the badge separates it by construction.
+# Keying on `\breference:` was measured to fail three ways.
+check 'capital Reference: is not a location'         "$(by 11 '.path')" '(location unknown)'
+check 'an unlabelled docs cite is not a location'    "$(by 12 '.path')" '(location unknown)'
+check 'a non-AGENTS.md cite is not a location'       "$(by 13 '.path')" '(location unknown)'
+check 'none of them steal a sha'                     "$(by 11 '.reviewed_sha')|$(by 12 '.reviewed_sha')|$(by 13 '.reviewed_sha')" '||'
+check 'all three stay live'                          "$(by 11 '.stale')|$(by 12 '.stale')|$(by 13 '.stale')" 'false|false|false'
+# The accepted cost, pinned so it is a decision and not a surprise: a code
+# permalink that appears only AFTER the badge is not read as a location either.
+# The documented shape puts it ahead of the badge. Erring this way leaves an
+# unlocated, LIVE finding — it blocks a merge instead of hiding one.
+check 'a link after the badge is not read'           "$(by 14 '.path')" '(location unknown)'
+check 'but that finding still blocks'                "$(by 14 '.stale')|$(by 14 '.anchored')" 'false|true'
+
 # --- the shapes that already worked, so the fallback cannot mask them --------
-check 'total findings parsed'                "$(q 'length')"          '7'
+check 'total findings parsed'                "$(q 'length')"          '11'
 check 'located finding keeps its path'       "$(by 1 '.path')"        'packages/api/src/routes/auth.ts'
 check 'located finding keeps its line'       "$(by 1 '.line')"        '169'
 check 'located finding takes the FIRST link' "$(by 1 '.start_line')"  'null'
@@ -155,7 +186,7 @@ check 'wrong author is not a finding'        "$(q '[.[] | select(.id == 7)] | le
 
 # --- the count `status` actually gates on -----------------------------------
 # Both permalink-less findings land here. Before the fallback this was 3.
-check 'live findings counted'                "$(q '[.[] | select(.stale == false and .anchored == true)] | length')" '6'
+check 'live findings counted'                "$(q '[.[] | select(.stale == false and .anchored == true)] | length')" '10'
 
 # --- staleness by date, when there is no sha to compare ---------------------
 #
@@ -174,12 +205,12 @@ check 'unlocated, posted after head, live'   "$(d "$MID" 9 '.stale')" 'false'
 # The whole point: the merge gate lets go once the work moves on.
 # Live drops from 5 to 3: the two unlocated findings that predate the newest
 # commit let go, while id 9 (posted after it) and the two sha-matched ones hold.
-check 'stale unlocated stops blocking'       "$(printf '%s' "$MID" | jq '[.[] | select(.stale == false and .anchored == true)] | length')" '4'
+check 'stale unlocated stops blocking'       "$(printf '%s' "$MID" | jq '[.[] | select(.stale == false and .anchored == true)] | length')" '8'
 
 LATER="$(fetch_issue_findings "O/R" "$HEAD_SHA" 1 '2026-08-18T00:30:00Z')"
 # Selected on the empty sha, not on the source: every finding here is source
 # "issue", so that predicate would also count the one already stale by hash.
-check 'every unlocated goes stale eventually' "$(printf '%s' "$LATER" | jq '[.[] | select(.reviewed_sha == "" and .stale)] | length')" '4'
+check 'every unlocated goes stale eventually' "$(printf '%s' "$LATER" | jq '[.[] | select(.reviewed_sha == "" and .stale)] | length')" '8'
 # A sha that names HEAD outranks any date — the finding IS about this commit.
 check 'sha naming head beats a later date'   "$(d "$LATER" 1 '.stale')" 'false'
 

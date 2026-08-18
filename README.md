@@ -54,11 +54,18 @@ The permalink is a Codex habit, not a contract, and `1xp-dorami` is under no obl
 to copy it. A finding nobody can place is still a finding: report it as
 `(location unknown)` and let it block the merge.
 
-Search for that permalink in the body **minus the `AGENTS.md reference:` footer**, too.
-The citation is a blob permalink as well, so on a body with no code permalink it is the
-first match: the finding gets placed in `AGENTS.md`, dated by the cited commit, and —
-since that is not HEAD — reads `STALE` and drops out of the gate exactly as deletion
-would. Same wrong answer, third route in.
+Search for that permalink **only in the part of the body before the badge**, too. When a
+finding cites a repo rule, Codex appends an `AGENTS.md reference:` link, which is a blob
+permalink as well — so on a body with no code permalink it is the first match: the finding
+gets placed in `AGENTS.md`, dated by the cited commit, and — since that is not HEAD —
+reads `STALE` and drops out of the gate exactly as deletion would. Same wrong answer,
+another route in.
+
+Separate them by **position**. The code permalink precedes the badge and the citation
+follows the rationale, so cutting at the badge is structural. Do not key on the label:
+`Reference:` with a capital R, or a bare `See [...](...)`, walks straight past a
+`\breference:` pattern. Do not key on the filename either — the cited file is whatever
+rules file the repo keeps, and a finding may legitimately be *about* `AGENTS.md`.
 
 Then give it the **date** fallback the review-comment parser already has
 (`created_at < headdate`), or it blocks forever — with no sha there is nothing to compare
