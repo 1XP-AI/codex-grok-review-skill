@@ -1,11 +1,11 @@
 ---
 name: codex-review
-description: Read Codex code-review findings on a GitHub pull request, and drive the @codex review re-review loop. Use whenever you need to check whether Codex reviewed a PR, read its findings with their P1/P2/P3 severity, decide if a PR is clear to merge, or request a re-review after pushing fixes. The obvious `gh` commands silently omit findings and drop severity — always use this skill instead of hand-rolling `gh pr view`.
+description: Read Codex and Grok code-review findings on a GitHub pull request, and drive the @codex review re-review loop. Use whenever you need to check whether Codex or Grok reviewed a PR, read its findings with their P0–P4 severity, decide if a PR is clear to merge, or request a re-review after pushing fixes. The obvious `gh` commands silently omit findings and drop severity — always use this skill instead of hand-rolling `gh pr view`.
 ---
 
-# Codex review on GitHub PRs
+# Codex / Grok review on GitHub PRs
 
-Codex posts findings as **inline review comments** with severity badges. Reading them
+Codex and Grok post findings as **inline review comments** with severity badges. Reading them
 naïvely loses information in four ways. Use `scripts/codex-review.sh` rather than
 composing `gh` calls yourself.
 
@@ -39,12 +39,14 @@ place so they cannot drift (`findings` used to print open findings and exit `0`)
    endpoint silently drops those; a P1 sat unread on PR #591 that way. The wrapper reads
    both and normalises them into one list.
 2. **Severity is a markdown image badge.** Stripping "markdown noise" deletes the
-   `P1`/`P2`/`P3` you need to decide whether to merge — and it fails silently.
+   `P0`–`P4` you need to decide whether to merge — and it fails silently.
 3. **No findings ⇒ no review object.** The verdict is an *issue* comment:
-   `Codex Review: Didn't find any major issues. <random sign-off>` plus
+   `Codex Review: Didn't find any major issues. <random sign-off>` or
+   `Grok Review: Didn't find any major issues. 🚀`, plus
    **`Reviewed commit: <sha>`**. Never match the sign-off (it varies); match
    `Didn't find any major issues`, then check that the SHA is the PR's newest commit —
-   an older clean verdict does not vouch for code pushed since.
+   an older clean verdict does not vouch for code pushed since. Grok posts as
+   `1xp-dorami`; a comment from that login that is not a badge or this phrase is noise.
 4. **Old findings get re-anchored, and `commit_id` lies about it.** GitHub drags
    `commit_id` forward to the newest commit when it re-anchors a comment, so a stale
    finding reports HEAD. Use **`original_commit_id`** — it never moves and matches the
@@ -52,6 +54,11 @@ place so they cannot drift (`findings` used to print open findings and exit `0`)
    when `original_commit_id` is the PR's newest commit **and** `line != null`.
    An issue-comment finding has no `original_commit_id`; its permalink SHA plays that
    role, and it never goes `line == null` because nothing re-anchors it.
+5. **Two authors, one reader.** Codex is `chatgpt-codex-connector[bot]`. Grok is
+   `1xp-dorami`, and only when the body has `![P0 Badge]`–`![P4 Badge]` or
+   `Didn't find any major issues`. An open badge from either author makes `status`
+   exit `2` — a Codex CLEAN does not cover a Grok P2. `status` is `0` when **either** author posted a clean verdict naming HEAD
+   and there is no open badge. `@codex review` / `wait` / `request` stay Codex-only.
 
 ## Procedure
 

@@ -53,6 +53,9 @@ t 'live issue finding, empty list'  '0 0 0 0 "" 0 "" 1'   inconsistent 3
 # open beats a clean verdict: a later review can file against the same commit an
 # earlier one blessed.
 t 'open outranks a head-clean'    '2 5 1 0 "x" 1 abc 0' open         2
+# Mixed Codex+Grok thread: a clean verdict naming HEAD must not cover an
+# open Grok finding. Either author's open badge makes status 2, not 0.
+t 'mixed Codex clean + Grok P2'   '1 1 1 0 "x" 1 abc 1' open         2
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

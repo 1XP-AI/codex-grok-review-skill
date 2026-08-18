@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# codex-review — read Codex PR review findings correctly, and request re-reviews.
+# codex-review — read Codex and Grok PR review findings correctly, and request re-reviews.
 #
 # Why this exists: the obvious `gh` invocations silently omit Codex findings or
 # throw away their severity. See README.md for the measured behaviour.
@@ -8,7 +8,32 @@
 
 set -euo pipefail
 
-BOT="chatgpt-codex-connector"
+# Codex still posts as chatgpt-codex-connector[bot] (login startswith this).
+# Grok reviews post as 1xp-dorami. Only comments that look like a review count —
+# a P-badge or the clean-verdict phrase. Random 1xp-dorami chatter is ignored.
+# Override either login via the environment (or by editing these defaults)
+# so a different installation does not have to fork the jq filters.
+CODEX_LOGIN="${CODEX_LOGIN:-chatgpt-codex-connector}"
+GROK_LOGIN="${GROK_LOGIN:-1xp-dorami}"
+
+# jq library spliced into every comment/review filter.
+# Built from CODEX_LOGIN / GROK_LOGIN so the two cannot drift.
+# is_reviewer       — Codex login, or Grok login with a review-shaped body
+# is_finding_author — Codex login, or Grok login with a P-badge (clean != finding)
+jq_reviewer_lib() {
+  cat <<EOF
+def is_codex: startswith("${CODEX_LOGIN}");
+def is_grok: . == "${GROK_LOGIN}";
+def is_review_body: test("!\\\[P[0-9] Badge\\\]") or test("[Dd]idn.t find any major issues");
+def is_reviewer:
+  (.user.login | is_codex)
+  or ((.user.login | is_grok) and (.body // "" | is_review_body));
+def is_finding_author:
+  (.user.login | is_codex)
+  or ((.user.login | is_grok) and (.body // "" | test("!\\\[P[0-9] Badge\\\]")));
+EOF
+}
+JQ_REVIEWER_LIB="$(jq_reviewer_lib)"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
@@ -52,7 +77,7 @@ command -v jq >/dev/null || die "jq not found"
 
 usage() {
   cat <<'EOF'
-codex-review — read Codex PR review findings, and request re-reviews.
+codex-review — read Codex and Grok PR review findings, and request re-reviews.
 
 USAGE
   codex-review status <pr>     One-line verdict: has Codex reviewed? any open findings?
@@ -129,15 +154,15 @@ head_commit_date() {
 #   **Reviewed commit:** `<sha10>`
 # which is far better than guessing from timestamps.
 review_shas() {
-  api_all "repos/$1/pulls/$2/reviews" | jq -r "[ .[]
-          | select(.user.login | startswith(\"$BOT\"))
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[ .[]
+          | select(.user.login | is_codex)
           | { key: (.id | tostring),
               value: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
         ] | from_entries"
 }
 
 # All inline review comments authored by the Codex bot, enriched:
-#   severity     P1|P2|P3|—   (from the badge image alt text)
+#   severity     P0|P1|P2|P3|P4|—   (from the badge image alt text)
 #   title        the bolded finding headline
 #   rationale    the prose, minus the headline and the "Useful?" footer
 #   fix          the prescriptive clause Codex closes with (heuristic)
@@ -159,7 +184,7 @@ review_shas() {
 fetch_issue_findings() {
   local repo="$1" head_sha="$2"
   api_all "repos/$repo/issues/$3/comments" \
-  | jq --arg head "$head_sha" --arg bot "$BOT" '
+  | jq --arg head "$head_sha" "${JQ_REVIEWER_LIB}"'
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
       def _hv: {"0":0,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,
                 "a":10,"b":11,"c":12,"d":13,"e":14,"f":15}[ascii_downcase];
@@ -193,7 +218,7 @@ fetch_issue_findings() {
         | (if test("; ") then (split("; ") | last) else . end)
         | trim;
       [ .[]
-        | select(.user.login | startswith($bot))
+        | select(is_finding_author)
         | select(.body | test("!\\[P[0-9] Badge\\]"))
         | . as $c
         # Ranged permalinks exist (#L12-L14). Both ends are kept: reporting only
@@ -247,7 +272,7 @@ fetch_findings() {
   shamap="$(review_shas "$repo" "$pr")"
   # Findings that arrived as issue comments, in the same shape.
   extra="$(fetch_issue_findings "$repo" "$head_sha" "$pr")"
-  api_all "repos/$repo/pulls/$pr/comments" | jq -r "[ .[] | select(.user.login | startswith(\"$BOT\")) ]" \
+  api_all "repos/$repo/pulls/$pr/comments" | jq -r "${JQ_REVIEWER_LIB}[ .[] | select(is_finding_author) ]" \
   | jq --argjson shas "$shamap" --arg head "$head_sha" --arg headdate "$head_date" '
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
       # Codex states what to do in its FINAL SENTENCE, and when that sentence also
@@ -329,22 +354,29 @@ fetch_findings() {
 # Codex leaves NO review object when it has nothing to say — it reacts 👍 on the
 # PR instead. So "zero reviews" is ambiguous unless you also check reactions.
 has_thumbsup() {
-  api_all "repos/$1/issues/$2/reactions" | jq -r "[.[] | select((.user.login | startswith(\"$BOT\")) and .content == \"+1\")] | length" \
+  api_all "repos/$1/issues/$2/reactions" | jq -r "[.[] | select((.user.login | startswith(\"$CODEX_LOGIN\")) and .content == \"+1\")] | length" \
     2>/dev/null || echo 0
 }
 
 # A clean review ALSO lands as an issue comment carrying the commit it inspected:
 #
 #   Codex Review: Didn't find any major issues. Breezy!
+#   Grok Review: Didn't find any major issues. 🚀
 #   **Reviewed commit:** `d94a859dde`
 #
 # The sign-off wanders ("Bravo.", "Breezy!", "Keep them coming!", …), so never match
 # on it. The `Reviewed commit` hash is the valuable part: unlike a 👍 reaction, it
 # proves WHICH commit was reviewed. Emits "<iso8601>\t<sha>" per clean verdict.
+# $3 = all|codex|grok (default all). wait stays Codex-only.
 clean_verdicts() {
-  api_all "repos/$1/issues/$2/comments" | jq -r "[ .[]
-          | select(.user.login | startswith(\"$BOT\"))
+  local who="${3:-all}"
+  api_all "repos/$1/issues/$2/comments" | jq -r --arg who "$who" "${JQ_REVIEWER_LIB}[ .[]
+          | select(is_reviewer)
           | select(.body | test(\"[Dd]idn't find any major issues\"))
+          | select(
+              if $who == \"codex\" then (.user.login | is_codex)
+              elif $who == \"grok\" then (.user.login | is_grok)
+              else true end)
           | { created_at, sha: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
         ] | sort_by(.created_at) | .[] | \"\\(.created_at)\\t\\(.sha)\"" 2>/dev/null || true
 }
@@ -426,7 +458,7 @@ head_commit_sha() {
 }
 
 review_count() {
-  api_all "repos/$1/pulls/$2/reviews" | jq -r "[.[] | select(.user.login | startswith(\"$BOT\"))] | length" 2>/dev/null || echo 0
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[.[] | select(is_reviewer)] | length" 2>/dev/null || echo 0
 }
 
 # The fingerprint `wait` settles on: everything Codex has posted, both ways.
@@ -441,19 +473,19 @@ activity_stamp() {
   printf '%s|%s' \
     "$(latest_review_date "$1" "$2")" \
     "$(api_all "repos/$1/issues/$2/comments" \
-       | jq -r --arg bot "$BOT" '
+       | jq -r "${JQ_REVIEWER_LIB}"'
            [ .[]
-             | select(.user.login | startswith($bot))
+             | select(is_reviewer)
              | select(.body | test("!\\[P[0-9] Badge\\]") or test("major issues"))
              | .created_at ]
            | "\(length):\(max // "")"' 2>/dev/null)"
 }
 
 latest_review_date() {
-  api_all "repos/$1/pulls/$2/reviews" | jq -r "[.[] | select(.user.login | startswith(\"$BOT\")) | .submitted_at] | max // \"\"" 2>/dev/null
+  api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[.[] | select(is_reviewer) | .submitted_at] | max // \"\"" 2>/dev/null
 }
 
-sev_rank() { case "$1" in P1) echo 1;; P2) echo 2;; P3) echo 3;; *) echo 9;; esac; }
+sev_rank() { case "$1" in P0) echo 0;; P1) echo 1;; P2) echo 2;; P3) echo 3;; P4) echo 4;; *) echo 9;; esac; }
 
 cmd_json() {
   local repo pr head head_sha
@@ -474,7 +506,8 @@ verdict_key() {
   local open="$1" total="$2" reviews="$3" thumbs="$4" clean_line="$5" \
         clean_matches_head="$6" clean_sha="$7" issue_open="$8"
 
-  # A clean verdict naming the newest commit is the strongest possible signal.
+  # Either author naming HEAD is enough. An open badge from either side
+  # still wins (open==0 is required). wait/request stay Codex-only.
   if [ "$open" -eq 0 ] && [ "$clean_matches_head" -eq 1 ]; then
     echo clean-head; return 0
   fi
@@ -664,8 +697,8 @@ cmd_detail() {
 }
 
 cmd_status() {
-  local repo pr head head_sha json open p1 reviews thumbs latest issue_open
-  local clean clean_line clean_sha clean_at clean_matches_head
+  local repo pr head head_sha json open blocking reviews thumbs latest issue_open
+  local clean clean_line clean_sha clean_at clean_matches_head sev_counts
   repo="$(resolve_repo)"; pr="$1"
   head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
   # BEFORE the findings, and read once. A review landing between the two reads
@@ -673,7 +706,10 @@ cmd_status() {
   reviews="$(review_count "$repo" "$pr")"
   json="$(fetch_findings_settled "$repo" "$pr" "$head" "$head_sha" "$reviews")"
   open="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true)] | length')"
-  p1="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true and .severity == "P1")] | length')"
+  blocking="$(printf '%s' "$json" | jq '[.[] | select(.stale == false and .anchored == true and (.severity == "P0" or .severity == "P1"))] | length')"
+  sev_counts="$(printf '%s' "$json" | jq -r '
+    [.[] | select(.stale == false and .anchored == true) | .severity]
+    | group_by(.) | map("\(.[0]):\(length)") | join(" ")')"
   # An issue-comment finding is evidence a review happened even when no review
   # object exists — otherwise `status` reports "not reviewed yet" while a P1 it
   # just listed sits on the PR.
@@ -703,7 +739,7 @@ cmd_status() {
   else
     echo "  clean verdict : none"
   fi
-  echo "  open findings : $open  (P1: $p1)"
+  echo "  open findings : $open${sev_counts:+  ($sev_counts)}"
 
   # The decision itself lives in verdict_key. Everything below renders it.
   local key code total
@@ -731,7 +767,7 @@ cmd_status() {
       echo "                  finding list is empty. Re-run; do not read this as clean." ;;
     open)
       echo "  VERDICT       : $open OPEN FINDING(S) — address before merging."
-      [ "$p1" -gt 0 ] && echo "                  ⚠ $p1 of them are P1." ;;
+      [ "$blocking" -gt 0 ] && echo "                  ⚠ $blocking of them are P0/P1." ;;
     *)
       die "internal: unknown verdict key '$key'" ;;
   esac
@@ -791,7 +827,7 @@ cmd_wait() {
   echo "Waiting for a Codex verdict on ${head_sha:0:10} (timeout ${deadline}s)..."
   while [ "$elapsed" -lt "$deadline" ]; do
     # Strongest signal: a clean verdict naming this exact commit.
-    clean_sha="$(clean_verdicts "$repo" "$pr" | tail -n 1 | cut -f2)"
+    clean_sha="$(clean_verdicts "$repo" "$pr" codex | tail -n 1 | cut -f2)"
     if [ -n "$clean_sha" ] && [ -n "$head_sha" ] \
        && case "$head_sha" in "$clean_sha"*) true ;; *) false ;; esac; then
       echo "Clean verdict for ${clean_sha}."
