@@ -41,13 +41,16 @@ required reviewer has not vouched · `4` findings all stale.
    both and normalises them into one list.
 2. **Severity is a markdown image badge.** Stripping "markdown noise" deletes the
    `P0`–`P4` you need to decide whether to merge — and it fails silently.
-3. **No findings ⇒ no review object.** The verdict is an *issue* comment:
-   `Codex Review: Didn't find any major issues. <random sign-off>` or
-   `Grok Review: Didn't find any major issues. 🚀`, plus
-   **`Reviewed commit: <sha>`**. Never match the sign-off (it varies); match
-   `Didn't find any major issues`, then check that the SHA is the PR's newest commit —
-   an older clean verdict does not vouch for code pushed since. Grok posts as
-   `1xp-dorami`; a comment from that login that is not a badge or this phrase is noise.
+3. **No findings ⇒ no review object with findings — and the verdict lands on either
+   endpoint.** `Codex Review: Didn't find any major issues. <random sign-off>` or
+   `Grok Review: Didn't find any major issues. 🚀`, plus **`Reviewed commit: <sha>`**,
+   arrives as an *issue comment* OR as the *body of a review object*. Reading only
+   `issues/N/comments` calls a cleared PR unreviewed; the wrapper merges both and
+   normalises `submitted_at`/`created_at` before picking the latest. Never match the
+   sign-off (it varies); match `Didn't find any major issues`, then check that the SHA
+   is the PR's newest commit — an older clean verdict does not vouch for code pushed
+   since. Grok posts as `1xp-dorami`; a comment from that login that is not a badge or
+   this phrase is noise.
 4. **Old findings get re-anchored, and `commit_id` lies about it.** GitHub drags
    `commit_id` forward to the newest commit when it re-anchors a comment, so a stale
    finding reports HEAD. Use **`original_commit_id`** — it never moves and matches the

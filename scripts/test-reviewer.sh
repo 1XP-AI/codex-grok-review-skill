@@ -120,7 +120,7 @@ ask 'Grok review object is not Codex'          "$grok_review_obj"  '.user.login 
 
 # --- clean_verdicts runs for real, against a stubbed fetch ---------------------
 #
-# The function is sourced and its ONE network call is stubbed, so the actual jq
+# The function is sourced and its network calls are stubbed, so the actual jq
 # program runs. That matters: `clean_verdicts` swallows jq errors
 # (`2>/dev/null || true`), so a program that fails to compile returns an empty
 # list and reads as "no clean verdict" — indistinguishable from a real answer.
@@ -130,25 +130,69 @@ ask 'Grok review object is not Codex'          "$grok_review_obj"  '.user.login 
 # jq answered `codex/0 is not defined`, and the caller got nothing. `wait` reads
 # `clean_verdicts <repo> <pr> codex` as its strongest exit signal, so that signal
 # was dead. Asserting on output rather than on exit status is what pins it.
+#
+# The stub answers PER ENDPOINT, which is the point: a verdict reaches this
+# function as an issue comment OR as a review body, and reading one endpoint
+# reported a cleared PR as stale-clean/3. Serving the two fixtures separately
+# means a regression to a single fetch fails here rather than in production.
 eval "$(sed -n '/^clean_verdicts() {/,/^}/p' "$src")"
-FIXTURES='['"$codex_clean"','"$grok_clean"','"$grok_p2"','"$noise"']'
-api_all() { printf '%s' "$FIXTURES"; }
+eval "$(sed -n '/^reviewer_vouched() {/,/^}/p' "$src")"
+eval "$(sed -n '/^missing_reviewers() {/,/^}/p' "$src")"
+FIX_COMMENTS='[]'
+FIX_REVIEWS='[]'
+api_all() {
+  case "$1" in
+    */issues/*/comments) printf '%s' "$FIX_COMMENTS" ;;
+    */pulls/*/reviews)   printf '%s' "$FIX_REVIEWS" ;;
+    *) printf '[]' ;;
+  esac
+}
 
+# Everything on the issue-comment endpoint — the shape that always worked.
+FIX_COMMENTS='['"$codex_clean"','"$grok_clean"','"$grok_p2"','"$noise"']'
+FIX_REVIEWS='[]'
 got="$(clean_verdicts fake-repo 1 | cut -f3 | paste -sd, -)"
-check 'clean_verdicts all  -> both authors' "$got" 'codex,grok'
+check 'comments only -> both authors'       "$got" 'codex,grok'
 got="$(clean_verdicts fake-repo 1 codex | cut -f3 | paste -sd, -)"
-check 'clean_verdicts codex -> codex only'  "$got" 'codex'
+check 'comments only, codex filter'         "$got" 'codex'
 got="$(clean_verdicts fake-repo 1 grok | cut -f3 | paste -sd, -)"
-check 'clean_verdicts grok  -> grok only'   "$got" 'grok'
+check 'comments only, grok filter'          "$got" 'grok'
 got="$(clean_verdicts fake-repo 1 codex | cut -f2)"
-check 'clean_verdicts keeps the reviewed sha' "$got" 'd94a859dde'
+check 'comments only keeps the sha'         "$got" 'd94a859dde'
+
+# The same verdicts delivered as REVIEW BODIES. This is what PR #4 actually got
+# for two of its four commits, and what the single-endpoint read could not see.
+# Review objects date with submitted_at rather than created_at.
+codex_rev='{"user":{"login":"chatgpt-codex-connector[bot]"},"state":"COMMENTED","submitted_at":"2026-01-03T00:00:00Z","body":"Codex Review: Didn'"'"'t find any major issues.\n\n**Reviewed commit:** `227c4ca697`"}'
+grok_rev='{"user":{"login":"1xp-dorami"},"state":"COMMENTED","submitted_at":"2026-01-04T00:00:00Z","body":"Grok Review: Didn'"'"'t find any major issues. 🚀\n\n**Reviewed commit:** `227c4ca697`"}'
+FIX_COMMENTS='[]'
+FIX_REVIEWS='['"$codex_rev"','"$grok_rev"']'
+got="$(clean_verdicts fake-repo 1 | cut -f3 | paste -sd, -)"
+check 'review bodies alone are seen'        "$got" 'codex,grok'
+got="$(clean_verdicts fake-repo 1 grok | cut -f2)"
+check 'review body keeps the sha'           "$got" '227c4ca697'
+got="$(clean_verdicts fake-repo 1 | head -1 | cut -f1)"
+check 'review body dates by submitted_at'   "$got" '2026-01-03T00:00:00Z'
+
+# PR #4's exact shape: older verdicts as comments, the newest as a review body.
+# Reading comments alone put the latest at the OLD sha and answered stale-clean/3
+# for a PR that had just been cleared.
+FIX_COMMENTS='['"$grok_clean"']'
+FIX_REVIEWS='['"$grok_rev"']'
+got="$(clean_verdicts fake-repo 1 | tail -1 | cut -f2)"
+check 'newest verdict wins across endpoints' "$got" '227c4ca697'
+got="$(clean_verdicts fake-repo 1 | wc -l | tr -d ' ')"
+check 'both endpoints merge into one list'   "$got" '2'
+# A reviewer that only ever spoke through a review body must still count.
+# shellcheck disable=SC2034
+REQUIRED_REVIEWERS='grok'
+check 'review-body clean satisfies the policy' \
+  "$(missing_reviewers "$(clean_verdicts fake-repo 1)" 227c4ca697ed9bdd)" ''
 
 # --- REQUIRED_REVIEWERS: who still owes a verdict ------------------------------
 #
 # Pure text over a clean_verdicts snapshot. A reviewer is missing when it filed no
 # clean verdict, or when its latest one names a commit that is not HEAD.
-eval "$(sed -n '/^reviewer_vouched() {/,/^}/p' "$src")"
-eval "$(sed -n '/^missing_reviewers() {/,/^}/p' "$src")"
 grok_only="$(printf '2026-01-01T00:00:00Z\tabc123\tgrok\n')"
 codex_only="$(printf '2026-01-01T00:00:00Z\tabc123\tcodex\n')"
 both="$(printf '2026-01-01T00:00:00Z\tabc123\tcodex\n2026-01-02T00:00:00Z\tabc123\tgrok\n')"
