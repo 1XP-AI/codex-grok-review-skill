@@ -22,9 +22,11 @@ eval "$(awk '/^CODEX_LOGIN=/{p=1} p{print} /^JQ_REVIEWER_LIB=/{exit}' "$src")"
 JQ_REVIEWER_LIB="$(jq_reviewer_lib)"
 [ -n "${JQ_REVIEWER_LIB:-}" ] || { echo "JQ_REVIEWER_LIB not extracted" >&2; exit 1; }
 
-fn="$(sed -n '/^codex_errors() {/,/^}/p' "$src")"
-[ -n "$fn" ] || { echo "codex_errors not found in $src — was it renamed?" >&2; exit 1; }
-eval "$fn"
+for name in codex_errors latest_codex_word_date live_codex_error_at; do
+  fn="$(sed -n "/^${name}() {/,/^}/p" "$src")"
+  [ -n "$fn" ] || { echo "$name not found in $src — was it renamed?" >&2; exit 1; }
+  eval "$fn"
+done
 
 pass=0; fail=0
 check() {
@@ -87,6 +89,44 @@ check 'a human quoting it is not an error' "$(codex_errors o/r 1 | grep -c . || 
 # One endpoint down must not blank the other.
 api_all() { case "$1" in */issues/*) printf '%s' "$ISSUE_COMMENTS" ;; *) return 1 ;; esac; }
 check 'a failing reviews endpoint is tolerated' "$(codex_errors o/r 1 | tail -n 1)" '2026-08-20T06:56:39Z'
+
+# ── Liveness: is the notice Codex's LAST word? ──────────────────────────────
+#
+# The trap this pins (P1 on PR #7): a notice delivered as a REVIEW OBJECT used
+# to be its own superseding "later word" — err_at == latest_review_date, the >
+# check false — and with one review counted and nothing filed, the verdict
+# walked to clean/0 over a crash. A word is a word only if it is not the scream.
+
+# Notice as a review object, and nothing else on the PR: LIVE.
+api_all() { case "$1" in */pulls/*) printf '%s' "$REVIEWS" ;; *) printf '[]' ;; esac; }
+check 'a review-object notice does not supersede itself' \
+  "$(live_codex_error_at o/r 1 '')" '2026-08-20T04:00:00Z'
+
+# A later REAL review supersedes it.
+later_review='[
+  {"user":{"login":"chatgpt-codex-connector[bot]"},"submitted_at":"2026-08-20T04:00:00Z",
+   "body":"Codex Review: Something went wrong. Try again later by commenting “@codex review”."},
+  {"user":{"login":"chatgpt-codex-connector[bot]"},"submitted_at":"2026-08-20T05:00:00Z",
+   "body":"real review pass"}
+]'
+api_all() { case "$1" in */pulls/*) printf '%s' "$later_review" ;; *) printf '[]' ;; esac; }
+check 'a later real review supersedes the notice' "$(live_codex_error_at o/r 1 '')" ''
+
+# A later clean verdict (from the caller-supplied snapshot) supersedes it too.
+api_all() { case "$1" in */pulls/*) printf '%s' "$REVIEWS" ;; *) printf '[]' ;; esac; }
+clean_snapshot="$(printf '2026-08-20T05:34:41Z\tabc1234\tcodex')"
+check 'a later clean verdict supersedes the notice' \
+  "$(live_codex_error_at o/r 1 "$clean_snapshot")" ''
+
+# …but an EARLIER clean verdict does not.
+older_clean="$(printf '2026-08-20T03:00:00Z\tabc1234\tcodex')"
+check 'an earlier clean verdict does not' \
+  "$(live_codex_error_at o/r 1 "$older_clean")" '2026-08-20T04:00:00Z'
+
+# A Grok verdict is not a Codex word.
+grok_clean="$(printf '2026-08-20T05:00:00Z\tdef5678\tgrok')"
+check 'a grok verdict is not a codex word' \
+  "$(live_codex_error_at o/r 1 "$grok_clean")" '2026-08-20T04:00:00Z'
 
 echo
 if [ "$fail" -gt 0 ]; then echo "$fail failing, $pass ok"; exit 1; fi

@@ -609,6 +609,27 @@ codex_errors() {
         ] | sort | .[]" 2>/dev/null || true
 }
 
+# The newest LIVE failure notice, or nothing. One implementation, two callers —
+# cmd_status and verdict_for — because the tenth verdict argument is exactly the
+# kind of input that gets added to one call site and forgotten in the other
+# (it was: `findings` shipped answering not-reviewed/3 on a crash-only PR while
+# `status` said codex-errored/5, breaking the shared-exit-code promise — P1 on
+# PR #7 of this repo).
+#
+# A notice is live while it is Codex's latest word. Words: clean verdicts (from
+# the snapshot in $3, so the caller's own fetch is reused) and review objects
+# that are not themselves the notice (latest_codex_word_date). ISO8601 compares
+# correctly as text.
+live_codex_error_at() {
+  local repo="$1" pr="$2" clean="$3" err_at word
+  err_at="$(codex_errors "$repo" "$pr" | tail -n 1)"
+  [ -n "$err_at" ] || return 0
+  word="$(printf '%s\n' "$clean" | awk -F'\t' '$3 == "codex" { t = $1 } END { print t }')"
+  local rw; rw="$(latest_codex_word_date "$repo" "$pr")"
+  if [ -n "$rw" ] && { [ -z "$word" ] || [ "$rw" \> "$word" ]; }; then word="$rw"; fi
+  if [ -z "$word" ] || [ "$err_at" \> "$word" ]; then printf '%s' "$err_at"; fi
+}
+
 # Has $3 filed a clean verdict naming commit $2, given the snapshot $1?
 #
 # Its LATEST verdict, not any of them: an older blessing does not cover code pushed
@@ -774,6 +795,22 @@ latest_review_date() {
   api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[.[] | select(.user.login | is_codex) | .submitted_at] | max // \"\"" 2>/dev/null
 }
 
+# Codex's newest review object that is NOT itself a failure notice.
+#
+# The liveness check must not use latest_review_date: a notice delivered as a
+# REVIEW OBJECT (the merged-endpoint shape codex_errors exists for) would then
+# be its own superseding "later word" — err_at == latest, the > check false,
+# err_live 0 — and with review_count now 1 and nothing filed, the verdict walks
+# to clean/0 over a crash (P1 on PR #7 of this repo, reproduced). A word is a
+# word only if it is not the scream.
+latest_codex_word_date() {
+  api_all "repos/$1/pulls/$2/reviews" \
+  | jq -r "${JQ_REVIEWER_LIB}[.[]
+        | select(.user.login | is_codex)
+        | select(.body // \"\" | is_error_body | not)
+        | .submitted_at] | max // \"\"" 2>/dev/null
+}
+
 cmd_json() {
   local repo pr head head_sha
   repo="$(resolve_repo)"; pr="$1"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
@@ -904,9 +941,14 @@ verdict_for() {
   if head_clean_exists "$clean" "$head_sha"; then matches=1; fi
   # Counted off the snapshot already fetched, never re-read — see missing_reviewers.
   missing="$(missing_reviewers "$clean" "$head_sha")"
+  # The tenth argument, from the SAME helper cmd_status uses — see
+  # live_codex_error_at for why this cannot be inlined in only one caller.
+  local err_live=0
+  [ -n "$(live_codex_error_at "$repo" "$pr" "$clean")" ] && err_live=1
 
   verdict_key "$open" "$total" "$reviews" "$thumbs" "$clean_line" "$matches" \
-    "$clean_sha" "$(issue_open_in "$json")" "$([ -n "$missing" ] && echo 1 || echo 0)"
+    "$clean_sha" "$(issue_open_in "$json")" "$([ -n "$missing" ] && echo 1 || echo 0)" \
+    "$err_live"
 }
 
 print_findings() {
@@ -1036,20 +1078,9 @@ cmd_status() {
   latest="$(latest_review_date "$repo" "$pr")"
 
   clean="$(clean_verdicts "$repo" "$pr")"
-  # Is Codex's LAST word a failure notice? Compare its newest error against its
-  # newest real utterance — review object (latest_review_date is codex-only) or
-  # clean verdict. ISO8601 compares correctly as text. An error followed by any
-  # later codex word is history, not state.
-  local err_at codex_word err_live
-  err_at="$(codex_errors "$repo" "$pr" | tail -n 1)"
-  err_live=0
-  if [ -n "$err_at" ]; then
-    codex_word="$(printf '%s\n' "$clean" | awk -F'\t' '$3 == "codex" { t = $1 } END { print t }')"
-    if [ -n "$latest" ] && { [ -z "$codex_word" ] || [ "$latest" \> "$codex_word" ]; }; then
-      codex_word="$latest"
-    fi
-    if [ -z "$codex_word" ] || [ "$err_at" \> "$codex_word" ]; then err_live=1; fi
-  fi
+  local err_at err_live
+  err_at="$(live_codex_error_at "$repo" "$pr" "$clean")"
+  err_live=0; [ -n "$err_at" ] && err_live=1
   clean_line="$(printf '%s' "$clean" | tail -n 1)"
   clean_at="$(printf '%s' "$clean_line" | cut -f1)"
   clean_sha="$(printf '%s' "$clean_line" | cut -f2)"
