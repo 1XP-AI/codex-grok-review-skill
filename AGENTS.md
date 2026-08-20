@@ -176,8 +176,13 @@ status → not reviewed?  → request → wait → status
     - **A 👍 neutralises the crash** rather than superseding it: it is Codex's
       only nothing-to-file success and is untimestamped, so it cannot be
       ordered; ranking the crash above it made request→👍→status loop forever.
+      `wait`'s crash branch exits with the settled status rather than a
+      hardcoded 5 for the same reason — the loop existed one layer up too.
     - In `wait`, take the notice watermark BEFORE any other startup request, or
-      a notice landing during them is swallowed as pre-existing.
+      a notice landing during them is swallowed as pre-existing. The watermark
+      is a **(count, latest-date) pair**: GitHub stamps at one-second
+      resolution, so a second notice in the same second compares equal on the
+      date alone.
     - **Liveness is ONE snapshot.** Deriving the errors and the words from
       separate fetches let a notice landing between them yield clean/0 over
       Codex's newest failure.

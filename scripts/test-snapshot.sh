@@ -84,5 +84,28 @@ cmd_status() { return 2; }
 ( cmd_wait 1 > /dev/null 2>&1 ); check 'clean accept propagates status 2' "$?" 2
 cmd_status() { return 0; }
 ( cmd_wait 1 > /dev/null 2>&1 ); check 'clean accept still returns 0 when clean' "$?" 0
+
+# --- the crash branch: settled status, and a (count, latest) watermark ------
+# A fresh notice ends the wait with the SETTLED status: hardcoding 5 sent
+# request→wait drivers re-requesting forever past a 👍 that had neutralised
+# the crash (P1 on PR #7). And the watermark must be a pair — a second notice
+# in the same second compares equal on the date alone and was swallowed as
+# pre-existing (P2 on PR #7). codex_errors is stubbed through the call-counter
+# file: the entry capture sees the "before" snapshot, the loop the "after".
+clean_verdicts() { :; }
+export CODEX_GROK_REVIEW_INTERVAL=0 CODEX_GROK_REVIEW_TIMEOUT=2
+
+# ① nothing at entry → one notice in the loop; status says 5.
+codex_errors() { bump; if [ "$(count)" -ge 2 ]; then echo '2026-08-20T10:00:00Z'; fi; }
+cmd_status() { return 5; }
+reset; ( cmd_wait 1 > /dev/null 2>&1 ); check 'fresh crash settles to 5' "$?" 5
+# ② same fresh crash, but a 👍 neutralised it — status says 0, wait agrees.
+cmd_status() { return 0; }
+reset; ( cmd_wait 1 > /dev/null 2>&1 ); check 'a 👍-neutralised crash settles to 0' "$?" 0
+# ③ one notice at entry, a SECOND one in the same second during startup.
+codex_errors() { bump; echo '2026-08-20T10:00:00Z'; if [ "$(count)" -ge 2 ]; then echo '2026-08-20T10:00:00Z'; fi; }
+cmd_status() { return 5; }
+reset; ( cmd_wait 1 > /dev/null 2>&1 ); check 'a same-second second notice is fresh' "$?" 5
+unset CODEX_GROK_REVIEW_INTERVAL CODEX_GROK_REVIEW_TIMEOUT
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

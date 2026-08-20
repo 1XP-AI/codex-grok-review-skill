@@ -163,8 +163,8 @@ USAGE
   codex-grok-review json <pr>       Machine-readable findings (for agents/scripts)
   codex-grok-review request <pr>    Post "@codex review" to trigger a re-review
   codex-grok-review wait <pr>       Block until a review lands after the newest commit,
-                                    then exit with the settled status code (5 if Codex
-                                    posts a failure notice instead; 1 on timeout)
+                                    then exit with the settled status code (a fresh
+                                    failure notice usually settles to 5; 1 on timeout)
 
 OPTIONS
   -R, --repo OWNER/REPO   Target repo (default: repo of the current directory)
@@ -1243,8 +1243,14 @@ cmd_wait() {
   # crash it technically saw (P1 on PR #7). Only a NEW notice ends the wait: one
   # that predates this command was already reported by `status`, and the caller
   # chose to wait anyway — presumably having just re-requested.
-  local err_at_entry err_now
-  err_at_entry="$(codex_errors "$repo" "$pr" | tail -n 1)"
+  # The watermark is a PAIR (count, latest): GitHub stamps at one-second
+  # resolution, so a second notice landing in the same second as the first
+  # compares equal on the date alone and was swallowed as pre-existing (P2 on
+  # PR #7). Both halves come from ONE capture — snapshot doctrine.
+  local errs_entry err_at_entry err_count_entry errs_now err_now err_count_now
+  errs_entry="$(codex_errors "$repo" "$pr")"
+  err_at_entry="$(printf '%s' "$errs_entry" | tail -n 1)"
+  err_count_entry="$(printf '%s' "$errs_entry" | grep -c . || true)"
   local reviews_at_entry reviews_now
   reviews_at_entry="$(hashless_review_count "$repo" "$pr")" \
     || die "could not read the reviews of PR #$pr in $repo."
@@ -1281,12 +1287,18 @@ cmd_wait() {
     # A crash instead of a review. Without this check the notice is invisible to
     # every signal below — no badge, no verdict, no review object — and `wait`
     # sleeps out its full timeout on a bot that already said it will not answer.
-    # Exit 5 so a driving loop can distinguish "re-request" from "genuinely slow".
-    err_now="$(codex_errors "$repo" "$pr" | tail -n 1)"
-    if [ -n "$err_now" ] && [ "$err_now" != "$err_at_entry" ]; then
-      echo "Codex ERRORED instead of reviewing (${err_now}) — it asked to be re-requested."
-      cmd_status "$pr" || true
-      return 5
+    # Fresh = the pair moved: a later date, OR more notices at the same date.
+    # The exit is the SETTLED status, not a hardcoded 5: a 👍 neutralises the
+    # unorderable crash (status 0), and hardcoding 5 here sent request→wait
+    # drivers re-requesting forever past their own success (P1 on PR #7).
+    errs_now="$(codex_errors "$repo" "$pr")"
+    err_now="$(printf '%s' "$errs_now" | tail -n 1)"
+    err_count_now="$(printf '%s' "$errs_now" | grep -c . || true)"
+    if [ -n "$err_now" ] && { [ "$err_now" \> "$err_at_entry" ] || [ "$err_count_now" -gt "$err_count_entry" ]; }; then
+      echo "Codex posted a failure notice (${err_now}) instead of a review."
+      local code=0
+      cmd_status "$pr" || code=$?
+      return "$code"
     fi
     # A review that names this commit — exact, whatever the clocks say.
     # A lookup that FAILED is not a lookup that found nothing. Swallowing it here
