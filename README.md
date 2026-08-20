@@ -306,7 +306,7 @@ codex-grok-review detail-all 123  # same, including stale ones
 codex-grok-review all 123         # everything, incl. stale/outdated
 codex-grok-review json 123        # machine-readable, for agents
 codex-grok-review request 123     # post "@codex review"
-codex-grok-review wait 123        # block until a review lands after your newest commit
+codex-grok-review wait 123        # block until a review lands, then exit with the settled status
 ```
 
 Add `--repo OWNER/REPO` outside a checkout.
@@ -320,6 +320,7 @@ Add `--repo OWNER/REPO` outside a checkout.
 | 0 | Reviewed, no open findings |
 | 2 | Open findings exist |
 | 3 | Not reviewed yet, **or** the clean verdict names an older commit, **or** a required reviewer has not vouched for HEAD |
+| 5 | Codex errored — its last word is `Codex Review: Something went wrong…`; re-request. `wait` stops the moment a fresh failure notice lands and exits with the settled status — 5 unless a 👍 has neutralised the crash |
 | 4 | Reviewed; all findings stale/outdated — confirm they were addressed |
 
 ```bash
@@ -374,9 +375,12 @@ back to `(STALE — predates newest commit)`.
 
 ## Don't poll — get woken up
 
-`wait` blocks until a verdict lands for your newest commit. Backgrounded, that turns
-a review into a **push**: an agent that starts it goes on to other work and is
-re-invoked the moment the review arrives, instead of re-checking on a timer.
+`wait` blocks until a verdict lands for your newest commit, then exits with the
+**settled status code** — the same `0/2/3/4/5` as `status`, or `1` on timeout. (It
+used to discard the settled verdict and return 0; a failure notice landing during
+the settle window was invisible.) Backgrounded, that turns a review into a
+**push**: an agent that starts it goes on to other work and is re-invoked the
+moment the review arrives, instead of re-checking on a timer.
 
 ```bash
 codex-grok-review request 123

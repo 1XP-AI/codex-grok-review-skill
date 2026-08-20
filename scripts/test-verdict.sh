@@ -56,6 +56,27 @@ t 'a required reviewer has not vouched' '0 0 1 0 "x" 1 abc 0 1' partial-clean 3
 # Nobody cleared HEAD and the only verdict is older: the newest code really is
 # unreviewed, so this stays stale-clean and sends you to `request`.
 t 'clean verdict names an older'  '0 3 1 0 "x" 0 abc 0 1' stale-clean  3
+# Codex crashed instead of reviewing. Its failure notice is invisible to every
+# other signal — no badge, no clean phrase, no review object — so before the
+# tenth argument existed these four states read as not-reviewed / stale-clean /
+# partial-clean, all of which counsel the one thing that cannot help: waiting.
+# Observed on solana-world-soccer-2026#688 — `wait` slept its full timeout on a
+# bot that had already said, in prose, that it crashed.
+t 'codex posted only a failure notice' '0 0 0 0 "" 0 "" 0 1 1' codex-errored 5
+t 'error outranks a stale clean'   '0 0 1 0 "x" 0 abc 0 1 1' codex-errored 5
+t 'error outranks partial-clean'   '0 0 1 0 "x" 1 abc 0 1 1' codex-errored 5
+# The boundaries, corrected by review (P1s on PR #7 of this repo):
+# - a satisfied policy does NOT silence a fresh crash. The policy vouches for
+#   the commit; the crash answered whoever asked for a FRESH pass, and clean/0
+#   would hide that the ask failed. (This table once pinned the opposite.)
+t 'crash outranks even a met policy' '0 0 1 0 "x" 1 abc 0 0 1' codex-errored 5
+# - open findings are actionable without Codex — they outrank the crash.
+t 'open findings outrank the error' '2 2 1 0 "" 0 "" 0 1 1' open 2
+# - a 👍 is Codex's only nothing-to-file success and is untimestamped, so it
+#   cannot be ORDERED against the notice. The table already accepts a bare 👍
+#   as success; ranking the crash above it made request→👍→status re-request
+#   forever. The 👍 neutralises the crash instead.
+t 'a 👍 neutralises the crash'      '0 0 0 1 "" 0 "" 0 1 1' clean 0
 # Only the clean test consults the policy. A review that left a 👍 and no clean
 # comment still reports clean/0 — a reaction names no commit, so there is no
 # verdict for anyone to be missing from, and gating it would break that path.

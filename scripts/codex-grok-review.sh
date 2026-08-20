@@ -35,6 +35,7 @@ def is_codex: startswith("${CODEX_LOGIN}");
 def is_grok: . == "${GROK_LOGIN}";
 def is_badge_body: test("!\\\[P[0-9] Badge\\\]");
 def is_clean_body: test("[Dd]idn.t find any major issues");
+def is_error_body: startswith("Codex Review: Something went wrong");
 def is_review_body: is_badge_body or is_clean_body;
 def is_reviewer:
   (.user.login | is_codex)
@@ -161,7 +162,9 @@ USAGE
   codex-grok-review all <pr>        Every finding including outdated/resolved ones
   codex-grok-review json <pr>       Machine-readable findings (for agents/scripts)
   codex-grok-review request <pr>    Post "@codex review" to trigger a re-review
-  codex-grok-review wait <pr>       Block until a review lands after the newest commit
+  codex-grok-review wait <pr>       Block until a review lands after the newest commit,
+                                    then exit with the settled status code (a fresh
+                                    failure notice usually settles to 5; 1 on timeout)
 
 OPTIONS
   -R, --repo OWNER/REPO   Target repo (default: repo of the current directory)
@@ -173,9 +176,10 @@ ENVIRONMENT
                              (both), or "either" (one of them is enough).
   CODEX_LOGIN / GROK_LOGIN   Reviewer logins, if your installation differs
 
-EXIT CODES (status / findings)
+EXIT CODES (status / findings; wait settles into the same codes, or 1 on timeout)
   0  reviewed, no open findings          2  open findings exist
   3  not reviewed / stale / partial      4  reviewed, but findings are stale-only
+  5  codex errored — its last word is a failure notice; re-request
 
 EXAMPLES
   codex-grok-review status 123
@@ -232,8 +236,15 @@ head_commit_date() {
 #   **Reviewed commit:** `<sha10>`
 # which is far better than guessing from timestamps.
 review_shas() {
+  # A failure notice can arrive AS a review object, and one carrying a
+  # "Reviewed commit" line (or none at all) walked wait's landed-review path:
+  # reviewed_head saw its sha, hashless_review_count counted it, wait printed
+  # "Review landed." and settle_and_report returned 0 over a status of 5
+  # (P2 on PR #7). A crash is not a review — filter it here, the one source
+  # reviewed_head and hashless_review_count both read.
   api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[ .[]
           | select(.user.login | is_codex)
+          | select(.body // \"\" | is_error_body | not)
           | { key: (.id | tostring),
               value: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
         ] | from_entries"
@@ -579,6 +590,78 @@ clean_verdicts() {
         ] | sort_by(.at) | .[] | \"\\(.at)\\t\\(.sha)\\t\\(.who)\"" 2>/dev/null || true
 }
 
+# Codex failure notices — a crash posted where a review pass should have been:
+#
+#   Codex Review: Something went wrong. Try again later by commenting "@codex review".
+#
+# To every signal this script already reads, that comment is SILENCE: it carries
+# no badge, no clean phrase, no review object — so `status` answered
+# "awaiting: codex" and `wait` slept to its full timeout while the bot had
+# already said, in prose, that it crashed and wants to be re-asked. Observed on
+# solana-world-soccer-2026#688 (issuecomment-5352490610).
+#
+# Same two-endpoint rule as verdicts: nothing says the notice must stay an issue
+# comment, so reviews are merged in too. Emits one normalised ISO8601 timestamp
+# per notice, ascending — callers take the tail. Codex-only: Grok has not been
+# observed failing this way, and a Grok notice would need its own phrase anyway.
+codex_errors() {
+  codex_errors_in "$(codex_utterances "$1" "$2")"
+}
+
+# One fetch of both endpoints, reused for errors AND words. They used to be
+# fetched separately per question, and a notice landing between the two reads
+# produced an internally inconsistent snapshot: the word-fetch saw the new
+# notice (and excluded it, correctly, from the word list) while err_at still
+# named the old superseded one — clean/0 over Codex's newest failure (P1 on
+# PR #7). The split-snapshot doctrine `issue_open_in` exists for applies here
+# too: one fetch, many questions.
+codex_utterances() {
+  local repo="$1" pr="$2" comments reviews
+  # Tolerated separately, so one unreachable endpoint cannot blank out the other.
+  comments="$(api_all "repos/$repo/issues/$pr/comments" 2>/dev/null || printf '[]')"
+  reviews="$(api_all "repos/$repo/pulls/$pr/reviews" 2>/dev/null || printf '[]')"
+  printf '%s\n%s\n' "$comments" "$reviews"
+}
+
+# Pure text over an utterances snapshot ($1) — no API call.
+codex_errors_in() {
+  printf '%s\n' "$1" \
+  | jq -rs "${JQ_REVIEWER_LIB}[ .[][]
+          | select(.user.login | is_codex)
+          | select(.body // \"\" | is_error_body)
+          | (.submitted_at // .created_at // \"\")
+        ] | sort | .[]" 2>/dev/null || true
+}
+
+# The newest LIVE failure notice, or nothing. One implementation, two callers —
+# cmd_status and verdict_for — because the tenth verdict argument is exactly the
+# kind of input that gets added to one call site and forgotten in the other
+# (it was: `findings` shipped answering not-reviewed/3 on a crash-only PR while
+# `status` said codex-errored/5, breaking the shared-exit-code promise — P1 on
+# PR #7 of this repo).
+#
+# A notice is live while it is Codex's latest word. Words: clean verdicts (from
+# the snapshot in $3, so the caller's own fetch is reused) and review objects
+# that are not themselves the notice (latest_codex_word_in). ISO8601 compares
+# correctly as text.
+live_codex_error_at() {
+  local repo="$1" pr="$2" clean="$3" err_at word snap
+  # ONE snapshot answers both questions — see codex_utterances.
+  snap="$(codex_utterances "$repo" "$pr")"
+  err_at="$(codex_errors_in "$snap" | tail -n 1)"
+  [ -n "$err_at" ] || return 0
+  word="$(printf '%s\n' "$clean" | awk -F'\t' '$3 == "codex" { t = $1 } END { print t }')"
+  local rw; rw="$(latest_codex_word_in "$snap")"
+  if [ -n "$rw" ] && { [ -z "$word" ] || [ "$rw" \> "$word" ]; }; then word="$rw"; fi
+  # Ties are LIVE. GitHub stamps at one-second resolution, so a word and a
+  # notice in the same second are unorderable — and this repo's rule for
+  # unorderable races is to fail the safe way (P2 on PR #7): a suppressed crash
+  # waits out a timeout, a false-live crash costs one redundant re-request.
+  if [ -z "$word" ] || [ "$err_at" \> "$word" ] || [ "$err_at" = "$word" ]; then
+    printf '%s' "$err_at"
+  fi
+}
+
 # Has $3 filed a clean verdict naming commit $2, given the snapshot $1?
 #
 # Its LATEST verdict, not any of them: an older blessing does not cover code pushed
@@ -744,6 +827,33 @@ latest_review_date() {
   api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[.[] | select(.user.login | is_codex) | .submitted_at] | max // \"\"" 2>/dev/null
 }
 
+# Codex's newest review object that is NOT itself a failure notice.
+#
+# The liveness check must not use latest_review_date: a notice delivered as a
+# REVIEW OBJECT (the merged-endpoint shape codex_errors exists for) would then
+# be its own superseding "later word" — err_at == latest, the > check false,
+# err_live 0 — and with review_count now 1 and nothing filed, the verdict walks
+# to clean/0 over a crash (P1 on PR #7 of this repo, reproduced). A word is a
+# word only if it is not the scream.
+# Pure text over an utterances snapshot ($1) — no API call. Same two-endpoint
+# rule as everything else: a finding pass can arrive purely as ISSUE comments
+# (badge bodies, no review object). If those did not count as words, a notice
+# followed by such a pass stayed "live" forever — and once the finding went
+# stale, status exited 5 over a bot that had long since answered (P1 on PR #7).
+# Issue comments count only when they carry review content (badge or clean
+# phrase); chat noise is not a word. Review objects count unless they ARE the
+# notice.
+latest_codex_word_in() {
+  printf '%s\n' "$1" \
+  | jq -rs "${JQ_REVIEWER_LIB}[ .[][]
+        | select(.user.login | is_codex)
+        | select(
+            (has(\"submitted_at\") and (.body // \"\" | is_error_body | not))
+            or ((has(\"submitted_at\") | not) and (.body // \"\" | is_review_body)))
+        | (.submitted_at // .created_at // \"\")
+      ] | max // \"\"" 2>/dev/null
+}
+
 cmd_json() {
   local repo pr head head_sha
   repo="$(resolve_repo)"; pr="$1"; head="$(head_commit_date "$repo" "$pr")"; head_sha="$(head_commit_sha "$repo" "$pr")"
@@ -762,7 +872,7 @@ cmd_json() {
 verdict_key() {
   local open="$1" total="$2" reviews="$3" thumbs="$4" clean_line="$5" \
         head_clean_exists="$6" clean_sha="$7" issue_open="$8" \
-        missing_required="${9:-1}"
+        missing_required="${9:-1}" codex_errored="${10:-0}"
 
   # THE clean test, and it asks the policy — not the newest verdict on the PR.
   #
@@ -777,6 +887,20 @@ verdict_key() {
   # missing_required is per author and already asks each one's own latest verdict,
   # so it is the authority. It defaults to 1: an unknown policy state must never
   # be read as clean.
+  # A failure notice as Codex's LAST word outranks even a satisfied policy: the
+  # policy vouches for the commit, but the crash was the answer to whoever asked
+  # for a FRESH pass, and reporting clean would hide that the ask failed (P1 on
+  # PR #7 — this check once sat below clean-head and an earlier clean silenced a
+  # later crash). Two things still outrank the crash:
+  #   - open findings — actionable without Codex;
+  #   - a 👍. It is Codex's only nothing-to-file success and it is untimestamped,
+  #     so it cannot be ORDERED against the notice — but the verdict table
+  #     already accepts a bare 👍 as success, and ranking the crash above it made
+  #     the request→👍→status loop re-request forever (P1 on PR #7).
+  if [ "$open" -eq 0 ] && [ "$codex_errored" -eq 1 ] && [ "$thumbs" -eq 0 ]; then
+    echo codex-errored; return 5
+  fi
+
   if [ "$open" -eq 0 ] && [ "$missing_required" -eq 0 ]; then
     echo clean-head; return 0
   fi
@@ -865,9 +989,14 @@ verdict_for() {
   if head_clean_exists "$clean" "$head_sha"; then matches=1; fi
   # Counted off the snapshot already fetched, never re-read — see missing_reviewers.
   missing="$(missing_reviewers "$clean" "$head_sha")"
+  # The tenth argument, from the SAME helper cmd_status uses — see
+  # live_codex_error_at for why this cannot be inlined in only one caller.
+  local err_live=0
+  [ -n "$(live_codex_error_at "$repo" "$pr" "$clean")" ] && err_live=1
 
   verdict_key "$open" "$total" "$reviews" "$thumbs" "$clean_line" "$matches" \
-    "$clean_sha" "$(issue_open_in "$json")" "$([ -n "$missing" ] && echo 1 || echo 0)"
+    "$clean_sha" "$(issue_open_in "$json")" "$([ -n "$missing" ] && echo 1 || echo 0)" \
+    "$err_live"
 }
 
 print_findings() {
@@ -997,6 +1126,9 @@ cmd_status() {
   latest="$(latest_review_date "$repo" "$pr")"
 
   clean="$(clean_verdicts "$repo" "$pr")"
+  local err_at err_live
+  err_at="$(live_codex_error_at "$repo" "$pr" "$clean")"
+  err_live=0; [ -n "$err_at" ] && err_live=1
   clean_line="$(printf '%s' "$clean" | tail -n 1)"
   clean_at="$(printf '%s' "$clean_line" | cut -f1)"
   clean_sha="$(printf '%s' "$clean_line" | cut -f2)"
@@ -1009,6 +1141,7 @@ cmd_status() {
   echo "  newest commit : ${head:-unknown}  ${head_sha:0:10}"
   echo "  codex reviews : $reviews${latest:+  (latest $latest)}"
   echo "  codex 👍       : $thumbs"
+  [ "$err_live" -eq 1 ] && echo "  codex error   : ⚠ failure notice at ${err_at} — nothing from codex since"
   if [ -n "$clean_sha" ]; then
     echo "  clean verdict : yes — reviewed commit ${clean_sha}  ($clean_at)"
   elif [ -n "$clean_line" ]; then
@@ -1026,7 +1159,7 @@ cmd_status() {
   code=0
   key="$(verdict_key "$open" "$(printf '%s' "$json" | jq 'length')" "$reviews" "$thumbs" \
         "$clean_line" "$clean_matches_head" "$clean_sha" "${issue_open:-0}" \
-        "$([ -n "$missing" ] && echo 1 || echo 0)")" || code=$?
+        "$([ -n "$missing" ] && echo 1 || echo 0)" "$err_live")" || code=$?
   total="$(printf '%s' "$json" | jq 'length')"
 
   case "$key" in
@@ -1035,6 +1168,9 @@ cmd_status() {
     not-reviewed)
       echo "  VERDICT       : NOT REVIEWED — no review, no 👍, no clean verdict."
       echo "                  Trigger one:  codex-grok-review request $pr" ;;
+    codex-errored)
+      echo "  VERDICT       : CODEX ERRORED — its last word is a failure notice (${err_at})."
+      echo "                  It asked to be re-asked:  codex-grok-review request $pr" ;;
     stale-clean)
       echo "  VERDICT       : STALE CLEAN VERDICT — it names ${clean_sha}, not the newest commit."
       echo "                  Newer commits are unreviewed:  codex-grok-review request $pr" ;;
@@ -1083,8 +1219,13 @@ settle_and_report() {
   done
   # The stamp is a fingerprint, not a timestamp — say that something moved, not what.
   [ "$latest" != "$settle_prev" ] && echo "(more arrived while settling — reporting the full set)"
-  cmd_status "$pr" || true
-  return 0
+  # Propagate the settled verdict. A failure notice landing DURING the settle
+  # window is past the loop's last err_now check; discarding cmd_status's exit
+  # here returned 0 over a status of 5 (P1 on PR #7). The final status is the
+  # answer — including 5.
+  local code=0
+  cmd_status "$pr" || code=$?
+  return "$code"
 }
 
 cmd_wait() {
@@ -1096,6 +1237,20 @@ cmd_wait() {
   # Snapshot BEFORE the head lookups. A hashless review landing while those
   # requests are in flight would otherwise be indistinguishable from one that was
   # already there, and this command would wait out its whole timeout for it.
+  # Failure-notice watermark FIRST, before any other startup request: a notice
+  # landing while hashless_review_count was in flight used to be swallowed into
+  # the watermark as pre-existing, and the wait then slept out its timeout on a
+  # crash it technically saw (P1 on PR #7). Only a NEW notice ends the wait: one
+  # that predates this command was already reported by `status`, and the caller
+  # chose to wait anyway — presumably having just re-requested.
+  # The watermark is a PAIR (count, latest): GitHub stamps at one-second
+  # resolution, so a second notice landing in the same second as the first
+  # compares equal on the date alone and was swallowed as pre-existing (P2 on
+  # PR #7). Both halves come from ONE capture — snapshot doctrine.
+  local errs_entry err_at_entry err_count_entry errs_now err_now err_count_now
+  errs_entry="$(codex_errors "$repo" "$pr")"
+  err_at_entry="$(printf '%s' "$errs_entry" | tail -n 1)"
+  err_count_entry="$(printf '%s' "$errs_entry" | grep -c . || true)"
   local reviews_at_entry reviews_now
   reviews_at_entry="$(hashless_review_count "$repo" "$pr")" \
     || die "could not read the reviews of PR #$pr in $repo."
@@ -1112,13 +1267,38 @@ cmd_wait() {
   head_sha="$(head_commit_sha "$repo" "$pr")"
   echo "Waiting for a Codex verdict on ${head_sha:0:10} (timeout ${deadline}s)..."
   while [ "$elapsed" -lt "$deadline" ]; do
-    # Strongest signal: a clean verdict naming this exact commit.
+    # Strongest signal: a clean verdict naming this exact commit — but only when
+    # no failure notice is Codex's LATEST word. After `request && wait` on an
+    # already-cleared HEAD, the old HEAD-clean is still on the PR; accepting it
+    # blind returned 0 while `status` said 5, and the caller's loop stopped on
+    # the exact crash it had just re-requested past (P2 on PR #7).
     clean_sha="$(clean_verdicts "$repo" "$pr" codex | tail -n 1 | cut -f2)"
     if [ -n "$clean_sha" ] && [ -n "$head_sha" ] \
-       && case "$head_sha" in "$clean_sha"*) true ;; *) false ;; esac; then
+       && case "$head_sha" in "$clean_sha"*) true ;; *) false ;; esac \
+       && [ -z "$(live_codex_error_at "$repo" "$pr" "")" ]; then
       echo "Clean verdict for ${clean_sha}."
-      cmd_status "$pr" || true
-      return 0
+      # Propagate, as settle_and_report does. "Codex is clean" is not "the PR is
+      # clean": with a live Grok P2, status is 2, and a merge gate driven by this
+      # path passed over the displayed finding when this returned 0 (P1 on PR #7).
+      local code=0
+      cmd_status "$pr" || code=$?
+      return "$code"
+    fi
+    # A crash instead of a review. Without this check the notice is invisible to
+    # every signal below — no badge, no verdict, no review object — and `wait`
+    # sleeps out its full timeout on a bot that already said it will not answer.
+    # Fresh = the pair moved: a later date, OR more notices at the same date.
+    # The exit is the SETTLED status, not a hardcoded 5: a 👍 neutralises the
+    # unorderable crash (status 0), and hardcoding 5 here sent request→wait
+    # drivers re-requesting forever past their own success (P1 on PR #7).
+    errs_now="$(codex_errors "$repo" "$pr")"
+    err_now="$(printf '%s' "$errs_now" | tail -n 1)"
+    err_count_now="$(printf '%s' "$errs_now" | grep -c . || true)"
+    if [ -n "$err_now" ] && { [ "$err_now" \> "$err_at_entry" ] || [ "$err_count_now" -gt "$err_count_entry" ]; }; then
+      echo "Codex posted a failure notice (${err_now}) instead of a review."
+      local code=0
+      cmd_status "$pr" || code=$?
+      return "$code"
     fi
     # A review that names this commit — exact, whatever the clocks say.
     # A lookup that FAILED is not a lookup that found nothing. Swallowing it here

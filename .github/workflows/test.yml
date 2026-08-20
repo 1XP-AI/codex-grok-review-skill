@@ -36,3 +36,6 @@ jobs:
 
       - name: issue-comment finding parser
         run: bash scripts/test-issue-findings.sh
+
+      - name: failure-notice extractor
+        run: bash scripts/test-error.sh
