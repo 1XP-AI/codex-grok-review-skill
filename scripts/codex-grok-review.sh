@@ -1271,8 +1271,12 @@ cmd_wait() {
        && case "$head_sha" in "$clean_sha"*) true ;; *) false ;; esac \
        && [ -z "$(live_codex_error_at "$repo" "$pr" "")" ]; then
       echo "Clean verdict for ${clean_sha}."
-      cmd_status "$pr" || true
-      return 0
+      # Propagate, as settle_and_report does. "Codex is clean" is not "the PR is
+      # clean": with a live Grok P2, status is 2, and a merge gate driven by this
+      # path passed over the displayed finding when this returned 0 (P1 on PR #7).
+      local code=0
+      cmd_status "$pr" || code=$?
+      return "$code"
     fi
     # A crash instead of a review. Without this check the notice is invisible to
     # every signal below — no badge, no verdict, no review object — and `wait`

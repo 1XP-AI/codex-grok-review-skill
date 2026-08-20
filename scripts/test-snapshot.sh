@@ -64,5 +64,25 @@ review_count() { echo 9; }
 reset; fetch_findings_settled o/r 1 date sha 0 >/dev/null
 check 'a passed-in count is not re-read' "$(count)" '1'
 
+
+# --- wait's clean-accept path must propagate status -------------------------
+# "Codex is clean" is not "the PR is clean": with a live Grok P2 status is 2,
+# and this path returning a hardcoded 0 let a wait-driven merge gate pass over
+# the displayed finding (P1 on PR #7). Real cmd_wait, every dependency stubbed;
+# the clean branch is reached on the first loop iteration.
+wait_fn="$(sed -n '/^cmd_wait() {/,/^}/p' "$src")"
+[ -n "$wait_fn" ] || { echo "cmd_wait not found in $src — renamed?" >&2; exit 1; }
+eval "$wait_fn"
+resolve_repo() { echo o/r; }
+codex_errors() { :; }
+hashless_review_count() { echo 0; }
+head_commit_sha() { echo abc123def; }
+clean_verdicts() { printf '2026-08-20T09:00:00Z\tabc123\tcodex\n'; }
+live_codex_error_at() { :; }
+die() { echo "die: $*" >&2; exit 97; }
+cmd_status() { return 2; }
+( cmd_wait 1 > /dev/null 2>&1 ); check 'clean accept propagates status 2' "$?" 2
+cmd_status() { return 0; }
+( cmd_wait 1 > /dev/null 2>&1 ); check 'clean accept still returns 0 when clean' "$?" 0
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
