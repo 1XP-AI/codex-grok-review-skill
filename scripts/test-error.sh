@@ -86,6 +86,14 @@ only_human='[{"user":{"login":"someone"},"created_at":"2026-08-20T07:00:00Z","bo
 api_all() { case "$1" in */issues/*) printf '%s' "$only_human" ;; *) printf '[]' ;; esac; }
 check 'a human quoting it is not an error' "$(codex_errors o/r 1 | grep -c . || true)" 0
 
+# CODEX quoting the phrase mid-body is not a crash either — a review of code
+# that emits this very message (this repo, for one) mentions it in rationale.
+# Only a body that STARTS with the phrase is the notice (P1: prefix anchor).
+codex_quotes='[{"user":{"login":"chatgpt-codex-connector[bot]"},"created_at":"2026-08-20T07:10:00Z",
+  "body":"![P1 Badge](x) **Do not match Codex Review: Something went wrong loosely**\nbecause reviews quoting it would classify as crashes."}]'
+api_all() { case "$1" in */issues/*) printf '%s' "$codex_quotes" ;; *) printf '[]' ;; esac; }
+check 'codex quoting it mid-body is not an error' "$(codex_errors o/r 1 | grep -c . || true)" 0
+
 # One endpoint down must not blank the other.
 api_all() { case "$1" in */issues/*) printf '%s' "$ISSUE_COMMENTS" ;; *) return 1 ;; esac; }
 check 'a failing reviews endpoint is tolerated' "$(codex_errors o/r 1 | tail -n 1)" '2026-08-20T06:56:39Z'
@@ -127,6 +135,27 @@ check 'an earlier clean verdict does not' \
 grok_clean="$(printf '2026-08-20T05:00:00Z\tdef5678\tgrok')"
 check 'a grok verdict is not a codex word' \
   "$(live_codex_error_at o/r 1 "$grok_clean")" '2026-08-20T04:00:00Z'
+
+# A LATER Codex finding delivered purely as an issue comment (badge body, no
+# review object) IS a word — without this, the notice stayed live forever and
+# status exited 5 after the finding went stale (P1: issue findings are words).
+notice_then_issue_finding='[
+  {"user":{"login":"chatgpt-codex-connector[bot]"},"created_at":"2026-08-20T06:56:39Z",
+   "body":"Codex Review: Something went wrong. Try again later by commenting “@codex review”."},
+  {"user":{"login":"chatgpt-codex-connector[bot]"},"created_at":"2026-08-20T07:20:00Z",
+   "body":"### 💡 Codex Review\n**![P2 Badge](https://img.shields.io/badge/P2-yellow)** later finding"}
+]'
+api_all() { case "$1" in */issues/*) printf '%s' "$notice_then_issue_finding" ;; *) printf '[]' ;; esac; }
+check 'a later issue-comment finding supersedes' "$(live_codex_error_at o/r 1 '')" ''
+# …but chat noise from the Codex login is NOT a word.
+notice_then_chat='[
+  {"user":{"login":"chatgpt-codex-connector[bot]"},"created_at":"2026-08-20T06:56:39Z",
+   "body":"Codex Review: Something went wrong. Try again later by commenting “@codex review”."},
+  {"user":{"login":"chatgpt-codex-connector[bot]"},"created_at":"2026-08-20T07:20:00Z",
+   "body":"ℹ️ About Codex in GitHub — how reviews are triggered."}
+]'
+api_all() { case "$1" in */issues/*) printf '%s' "$notice_then_chat" ;; *) printf '[]' ;; esac; }
+check 'codex chat noise is not a word' "$(live_codex_error_at o/r 1 '')" '2026-08-20T06:56:39Z'
 
 echo
 if [ "$fail" -gt 0 ]; then echo "$fail failing, $pass ok"; exit 1; fi

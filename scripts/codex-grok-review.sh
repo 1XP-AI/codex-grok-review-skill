@@ -35,7 +35,7 @@ def is_codex: startswith("${CODEX_LOGIN}");
 def is_grok: . == "${GROK_LOGIN}";
 def is_badge_body: test("!\\\[P[0-9] Badge\\\]");
 def is_clean_body: test("[Dd]idn.t find any major issues");
-def is_error_body: test("Codex Review: Something went wrong");
+def is_error_body: startswith("Codex Review: Something went wrong");
 def is_review_body: is_badge_body or is_clean_body;
 def is_reviewer:
   (.user.login | is_codex)
@@ -804,11 +804,24 @@ latest_review_date() {
 # to clean/0 over a crash (P1 on PR #7 of this repo, reproduced). A word is a
 # word only if it is not the scream.
 latest_codex_word_date() {
-  api_all "repos/$1/pulls/$2/reviews" \
-  | jq -r "${JQ_REVIEWER_LIB}[.[]
+  local comments reviews
+  # Same two-endpoint rule as everything else: a finding pass can arrive purely
+  # as ISSUE comments (badge bodies, no review object). If those did not count
+  # as words, a notice followed by such a pass stayed "live" forever — and once
+  # the finding went stale, status exited 5 over a bot that had long since
+  # answered (P1 on PR #7). Issue comments count only when they carry review
+  # content (badge or clean phrase); chat noise is not a word. Review objects
+  # count unless they ARE the notice.
+  comments="$(api_all "repos/$1/issues/$2/comments" 2>/dev/null || printf '[]')"
+  reviews="$(api_all "repos/$1/pulls/$2/reviews" 2>/dev/null || printf '[]')"
+  printf '%s\n%s\n' "$comments" "$reviews" \
+  | jq -rs "${JQ_REVIEWER_LIB}[ .[][]
         | select(.user.login | is_codex)
-        | select(.body // \"\" | is_error_body | not)
-        | .submitted_at] | max // \"\"" 2>/dev/null
+        | select(
+            (has(\"submitted_at\") and (.body // \"\" | is_error_body | not))
+            or ((has(\"submitted_at\") | not) and (.body // \"\" | is_review_body)))
+        | (.submitted_at // .created_at // \"\")
+      ] | max // \"\"" 2>/dev/null
 }
 
 cmd_json() {
@@ -844,17 +857,22 @@ verdict_key() {
   # missing_required is per author and already asks each one's own latest verdict,
   # so it is the authority. It defaults to 1: an unknown policy state must never
   # be read as clean.
-  if [ "$open" -eq 0 ] && [ "$missing_required" -eq 0 ]; then
-    echo clean-head; return 0
+  # A failure notice as Codex's LAST word outranks even a satisfied policy: the
+  # policy vouches for the commit, but the crash was the answer to whoever asked
+  # for a FRESH pass, and reporting clean would hide that the ask failed (P1 on
+  # PR #7 — this check once sat below clean-head and an earlier clean silenced a
+  # later crash). Two things still outrank the crash:
+  #   - open findings — actionable without Codex;
+  #   - a 👍. It is Codex's only nothing-to-file success and it is untimestamped,
+  #     so it cannot be ORDERED against the notice — but the verdict table
+  #     already accepts a bare 👍 as success, and ranking the crash above it made
+  #     the request→👍→status loop re-request forever (P1 on PR #7).
+  if [ "$open" -eq 0 ] && [ "$codex_errored" -eq 1 ] && [ "$thumbs" -eq 0 ]; then
+    echo codex-errored; return 5
   fi
 
-  # A failure notice as Codex's last word outranks every flavour of "waiting":
-  # not-reviewed, stale-clean and partial-clean all counsel patience or a fresh
-  # request, and patience is exactly wrong when the bot has already said it
-  # crashed. Open findings still outrank the error — they are actionable
-  # without Codex — which is why this sits inside the open==0 world.
-  if [ "$open" -eq 0 ] && [ "$codex_errored" -eq 1 ]; then
-    echo codex-errored; return 5
+  if [ "$open" -eq 0 ] && [ "$missing_required" -eq 0 ]; then
+    echo clean-head; return 0
   fi
 
   # `total`, not just `issue_open`. An issue-comment finding leaves no review
@@ -1184,14 +1202,17 @@ cmd_wait() {
   # Snapshot BEFORE the head lookups. A hashless review landing while those
   # requests are in flight would otherwise be indistinguishable from one that was
   # already there, and this command would wait out its whole timeout for it.
+  # Failure-notice watermark FIRST, before any other startup request: a notice
+  # landing while hashless_review_count was in flight used to be swallowed into
+  # the watermark as pre-existing, and the wait then slept out its timeout on a
+  # crash it technically saw (P1 on PR #7). Only a NEW notice ends the wait: one
+  # that predates this command was already reported by `status`, and the caller
+  # chose to wait anyway — presumably having just re-requested.
+  local err_at_entry err_now
+  err_at_entry="$(codex_errors "$repo" "$pr" | tail -n 1)"
   local reviews_at_entry reviews_now
   reviews_at_entry="$(hashless_review_count "$repo" "$pr")" \
     || die "could not read the reviews of PR #$pr in $repo."
-  # Failure-notice watermark. Only a NEW notice ends the wait: one that predates
-  # this command was already reported by `status`, and the caller chose to wait
-  # anyway — presumably having just re-requested.
-  local err_at_entry err_now
-  err_at_entry="$(codex_errors "$repo" "$pr" | tail -n 1)"
   deadline="${CODEX_GROK_REVIEW_TIMEOUT:-${CODEX_REVIEW_TIMEOUT:-1800}}"
   interval="${CODEX_GROK_REVIEW_INTERVAL:-${CODEX_REVIEW_INTERVAL:-60}}"
   # A review pass is not always one post — Codex has been observed splitting

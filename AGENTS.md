@@ -159,11 +159,24 @@ status → not reviewed?  → request → wait → status
     review".` instead of a review. It carries no badge, no clean phrase and no
     review object, so every silence-shaped rule above reads it as "still
     waiting" — which is the one wrong response, since the bot has already asked
-    to be re-run. Treat a notice that is Codex's LATEST word (nothing from Codex
-    after it — verdicts and review objects both count as words) as its own
-    state: report it, exit `5`, and re-request. A notice followed by any later
-    Codex word is history. Match the phrase prefix `Codex Review: Something went
-    wrong` from the Codex login only — a human quoting it is not a crash.
+    to be re-run. Treat a notice that is Codex's LATEST word as its own state:
+    report it, exit `5`, and re-request. The details are where review found the
+    bugs (five P1s on PR #7 of this repo):
+    - **Words**: clean verdicts, review objects that are not themselves the
+      notice, and issue comments carrying review content (a badge or the clean
+      phrase) — a finding pass can arrive purely as issue comments, and if those
+      were not words the notice stayed live after they went stale. Chat noise
+      from the Codex login is not a word.
+    - **A body must START with the phrase** to be the notice. Any review of code
+      that emits this message quotes it mid-body — an unanchored match turns
+      those reviews into crashes and drops them from the word list too.
+    - **A fresh crash outranks even a satisfied policy** — the policy vouches
+      for the commit; the crash answered whoever asked for a fresh pass.
+    - **A 👍 neutralises the crash** rather than superseding it: it is Codex's
+      only nothing-to-file success and is untimestamped, so it cannot be
+      ordered; ranking the crash above it made request→👍→status loop forever.
+    - In `wait`, take the notice watermark BEFORE any other startup request, or
+      a notice landing during them is swallowed as pre-existing.
 
 ## Verifying claims about this behaviour
 
