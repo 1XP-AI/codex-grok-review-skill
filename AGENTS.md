@@ -126,8 +126,9 @@ composing `gh` calls by hand.
    The finding can be valid while the PR is not — fix it on a branch off `main`.
 
 8. **Prefer being woken to polling.** `wait` blocks until a verdict lands for the
-   newest commit. Run it as a background job and continue other work; its exit is the
-   signal. Do not re-run `status` on a timer.
+   newest commit, then exits with the settled `status` code (`1` on timeout). Run it
+   as a background job and continue other work; its exit is the signal. Do not re-run
+   `status` on a timer.
 
 9. **Re-request a review after pushing fixes.** Findings do not clear themselves and a
    push does not notify Codex. Post `@codex review` again, then re-check.
@@ -160,8 +161,8 @@ status → not reviewed?  → request → wait → status
     review object, so every silence-shaped rule above reads it as "still
     waiting" — which is the one wrong response, since the bot has already asked
     to be re-run. Treat a notice that is Codex's LATEST word as its own state:
-    report it, exit `5`, and re-request. The details are where review found the
-    bugs (five P1s on PR #7 of this repo):
+    report it, exit `5`, and re-request. The details are where review kept
+    finding the bugs (eight P1/P2s across two rounds on PR #7 of this repo):
     - **Words**: clean verdicts, review objects that are not themselves the
       notice, and issue comments carrying review content (a badge or the clean
       phrase) — a finding pass can arrive purely as issue comments, and if those
@@ -177,6 +178,16 @@ status → not reviewed?  → request → wait → status
       ordered; ranking the crash above it made request→👍→status loop forever.
     - In `wait`, take the notice watermark BEFORE any other startup request, or
       a notice landing during them is swallowed as pre-existing.
+    - **Liveness is ONE snapshot.** Deriving the errors and the words from
+      separate fetches let a notice landing between them yield clean/0 over
+      Codex's newest failure.
+    - **`wait` asks liveness before accepting an old HEAD-clean.** After
+      `request && wait` on an already-cleared HEAD, the stale clean returned 0
+      while `status` said 5 — the caller's loop stopped on the exact crash it
+      had just re-requested past.
+    - **`wait` propagates the settled status.** A notice landing during the
+      settle window is past the loop's last check; discarding the final
+      `status` exit returned 0 over a 5.
 
 ## Verifying claims about this behaviour
 

@@ -22,7 +22,7 @@ eval "$(awk '/^CODEX_LOGIN=/{p=1} p{print} /^JQ_REVIEWER_LIB=/{exit}' "$src")"
 JQ_REVIEWER_LIB="$(jq_reviewer_lib)"
 [ -n "${JQ_REVIEWER_LIB:-}" ] || { echo "JQ_REVIEWER_LIB not extracted" >&2; exit 1; }
 
-for name in codex_errors latest_codex_word_date live_codex_error_at review_shas; do
+for name in codex_errors codex_utterances codex_errors_in latest_codex_word_in live_codex_error_at review_shas; do
   fn="$(sed -n "/^${name}() {/,/^}/p" "$src")"
   [ -n "$fn" ] || { echo "$name not found in $src — was it renamed?" >&2; exit 1; }
   eval "$fn"
@@ -178,6 +178,18 @@ notice_then_chat='[
 ]'
 api_all() { case "$1" in */issues/*) printf '%s' "$notice_then_chat" ;; *) printf '[]' ;; esac; }
 check 'codex chat noise is not a word' "$(live_codex_error_at o/r 1 '')" '2026-08-20T06:56:39Z'
+
+# Liveness must be ONE snapshot: err_at and the word derived from separate
+# fetches let a notice landing between them produce clean/0 over Codex's newest
+# failure (P1 on PR #7). Pin the property, not the prose: exactly one read of
+# each endpoint per liveness question.
+calls="$(mktemp)"
+api_all() { echo "$1" >> "$calls"; case "$1" in */issues/*) printf '%s' "$ISSUE_COMMENTS" ;; */pulls/*) printf '%s' "$REVIEWS" ;; *) printf '[]' ;; esac; }
+live_codex_error_at o/r 1 '' > /dev/null
+check 'liveness reads each endpoint exactly once' \
+  "$(sort "$calls" | uniq -c | awk '{print $1}' | sort -u | tr -d ' ')" '1'
+check 'liveness reads both endpoints' "$(wc -l < "$calls" | tr -d ' ')" '2'
+rm -f "$calls"
 
 echo
 if [ "$fail" -gt 0 ]; then echo "$fail failing, $pass ok"; exit 1; fi
