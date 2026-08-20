@@ -22,7 +22,7 @@ eval "$(awk '/^CODEX_LOGIN=/{p=1} p{print} /^JQ_REVIEWER_LIB=/{exit}' "$src")"
 JQ_REVIEWER_LIB="$(jq_reviewer_lib)"
 [ -n "${JQ_REVIEWER_LIB:-}" ] || { echo "JQ_REVIEWER_LIB not extracted" >&2; exit 1; }
 
-for name in codex_errors latest_codex_word_date live_codex_error_at; do
+for name in codex_errors latest_codex_word_date live_codex_error_at review_shas; do
   fn="$(sed -n "/^${name}() {/,/^}/p" "$src")"
   [ -n "$fn" ] || { echo "$name not found in $src — was it renamed?" >&2; exit 1; }
   eval "$fn"
@@ -147,6 +147,28 @@ notice_then_issue_finding='[
 ]'
 api_all() { case "$1" in */issues/*) printf '%s' "$notice_then_issue_finding" ;; *) printf '[]' ;; esac; }
 check 'a later issue-comment finding supersedes' "$(live_codex_error_at o/r 1 '')" ''
+# A word and a notice in the SAME second are unorderable at GitHub's
+# one-second resolution — the tie reads as live (P2: suppressed crash costs a
+# timeout, false-live costs one redundant re-request).
+tie='[
+  {"user":{"login":"chatgpt-codex-connector[bot]"},"created_at":"2026-08-20T07:20:00Z",
+   "body":"Codex Review: Something went wrong. Try again later by commenting “@codex review”."},
+  {"user":{"login":"chatgpt-codex-connector[bot]"},"created_at":"2026-08-20T07:20:00Z",
+   "body":"### 💡 Codex Review\n**![P2 Badge](x)** same-second finding"}
+]'
+api_all() { case "$1" in */issues/*) printf '%s' "$tie" ;; *) printf '[]' ;; esac; }
+check 'a same-second tie reads as live' "$(live_codex_error_at o/r 1 '')" '2026-08-20T07:20:00Z'
+
+# An error REVIEW OBJECT must not look like a landed review: review_shas is the
+# one source reviewed_head and hashless_review_count read, and an unfiltered
+# notice there made wait print "Review landed." and return 0 over a status of 5.
+err_review_with_sha='[
+  {"id": 42, "user":{"login":"chatgpt-codex-connector[bot]"},"submitted_at":"2026-08-20T04:00:00Z",
+   "body":"Codex Review: Something went wrong. Try again later.\n**Reviewed commit:** `deadbeef`"}
+]'
+api_all() { case "$1" in */pulls/*) printf '%s' "$err_review_with_sha" ;; *) printf '[]' ;; esac; }
+check 'an error review object yields no review sha' "$(review_shas o/r 1)" '{}'
+
 # …but chat noise from the Codex login is NOT a word.
 notice_then_chat='[
   {"user":{"login":"chatgpt-codex-connector[bot]"},"created_at":"2026-08-20T06:56:39Z",

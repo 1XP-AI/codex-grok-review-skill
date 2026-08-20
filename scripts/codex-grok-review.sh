@@ -235,8 +235,15 @@ head_commit_date() {
 #   **Reviewed commit:** `<sha10>`
 # which is far better than guessing from timestamps.
 review_shas() {
+  # A failure notice can arrive AS a review object, and one carrying a
+  # "Reviewed commit" line (or none at all) walked wait's landed-review path:
+  # reviewed_head saw its sha, hashless_review_count counted it, wait printed
+  # "Review landed." and settle_and_report returned 0 over a status of 5
+  # (P2 on PR #7). A crash is not a review — filter it here, the one source
+  # reviewed_head and hashless_review_count both read.
   api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[ .[]
           | select(.user.login | is_codex)
+          | select(.body // \"\" | is_error_body | not)
           | { key: (.id | tostring),
               value: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
         ] | from_entries"
@@ -627,7 +634,13 @@ live_codex_error_at() {
   word="$(printf '%s\n' "$clean" | awk -F'\t' '$3 == "codex" { t = $1 } END { print t }')"
   local rw; rw="$(latest_codex_word_date "$repo" "$pr")"
   if [ -n "$rw" ] && { [ -z "$word" ] || [ "$rw" \> "$word" ]; }; then word="$rw"; fi
-  if [ -z "$word" ] || [ "$err_at" \> "$word" ]; then printf '%s' "$err_at"; fi
+  # Ties are LIVE. GitHub stamps at one-second resolution, so a word and a
+  # notice in the same second are unorderable — and this repo's rule for
+  # unorderable races is to fail the safe way (P2 on PR #7): a suppressed crash
+  # waits out a timeout, a false-live crash costs one redundant re-request.
+  if [ -z "$word" ] || [ "$err_at" \> "$word" ] || [ "$err_at" = "$word" ]; then
+    printf '%s' "$err_at"
+  fi
 }
 
 # Has $3 filed a clean verdict naming commit $2, given the snapshot $1?
