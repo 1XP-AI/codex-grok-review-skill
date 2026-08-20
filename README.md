@@ -320,6 +320,7 @@ Add `--repo OWNER/REPO` outside a checkout.
 | 0 | Reviewed, no open findings |
 | 2 | Open findings exist |
 | 3 | Not reviewed yet, **or** the clean verdict names an older commit, **or** a required reviewer has not vouched for HEAD |
+| 5 | Codex errored — its last word is `Codex Review: Something went wrong…`; re-request. `wait` also returns 5 the moment a fresh failure notice lands, instead of sleeping out its timeout |
 | 4 | Reviewed; all findings stale/outdated — confirm they were addressed |
 
 ```bash

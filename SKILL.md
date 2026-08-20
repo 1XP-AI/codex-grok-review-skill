@@ -28,9 +28,20 @@ Needs `gh` 2.44+ (for `api --slurp`); an older one is refused with a message.
 Exit codes for `status` / `findings` — the same codes from both, decided in one
 place so they cannot drift (`findings` used to print open findings and exit `0`):
 `0` reviewed & clean · `2` open findings · `3` not reviewed / stale verdict / a
-required reviewer has not vouched · `4` findings all stale.
+required reviewer has not vouched · `4` findings all stale · `5` Codex errored —
+its last word is a failure notice; re-request (`wait` shares this one).
 
 ## What goes wrong without this
+
+0. **Codex can crash instead of reviewing.** It posts
+   `Codex Review: Something went wrong. Try again later by commenting "@codex review".`
+   as an ordinary issue comment — no badge, no clean phrase, no review object — so
+   to every other signal it is SILENCE: `status` answers "awaiting: codex" and
+   `wait` sleeps out its whole timeout on a bot that already said it will not
+   answer. The wrapper reads these notices from both endpoints; when one is
+   Codex's latest word, `status` prints a `codex error` line and exits `5`, and
+   `wait` returns `5` the moment a fresh notice lands, so a driving loop can
+   re-`request` instead of waiting on a crash.
 
 1. **Findings live on two endpoints, and `gh pr view --json comments` shows neither
    completely.** Most are inline review comments (`gh api repos/O/R/pulls/N/comments`),

@@ -154,6 +154,17 @@ status → not reviewed?  → request → wait → status
     installed, so this is configured, not inferred. Keep `@codex review` / `wait`
     Codex-only.
 
+12. **A failure notice is an answer, not silence.** Codex sometimes posts
+    `Codex Review: Something went wrong. Try again later by commenting "@codex
+    review".` instead of a review. It carries no badge, no clean phrase and no
+    review object, so every silence-shaped rule above reads it as "still
+    waiting" — which is the one wrong response, since the bot has already asked
+    to be re-run. Treat a notice that is Codex's LATEST word (nothing from Codex
+    after it — verdicts and review objects both count as words) as its own
+    state: report it, exit `5`, and re-request. A notice followed by any later
+    Codex word is history. Match the phrase prefix `Codex Review: Something went
+    wrong` from the Codex login only — a human quoting it is not a crash.
+
 ## Verifying claims about this behaviour
 
 These rules were measured, not remembered. If you change one, include the command and

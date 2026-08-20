@@ -35,6 +35,7 @@ def is_codex: startswith("${CODEX_LOGIN}");
 def is_grok: . == "${GROK_LOGIN}";
 def is_badge_body: test("!\\\[P[0-9] Badge\\\]");
 def is_clean_body: test("[Dd]idn.t find any major issues");
+def is_error_body: test("Codex Review: Something went wrong");
 def is_review_body: is_badge_body or is_clean_body;
 def is_reviewer:
   (.user.login | is_codex)
@@ -162,6 +163,7 @@ USAGE
   codex-grok-review json <pr>       Machine-readable findings (for agents/scripts)
   codex-grok-review request <pr>    Post "@codex review" to trigger a re-review
   codex-grok-review wait <pr>       Block until a review lands after the newest commit
+                                    (exits 5 if Codex posts a failure notice instead)
 
 OPTIONS
   -R, --repo OWNER/REPO   Target repo (default: repo of the current directory)
@@ -173,9 +175,10 @@ ENVIRONMENT
                              (both), or "either" (one of them is enough).
   CODEX_LOGIN / GROK_LOGIN   Reviewer logins, if your installation differs
 
-EXIT CODES (status / findings)
+EXIT CODES (status / findings; wait shares 5)
   0  reviewed, no open findings          2  open findings exist
   3  not reviewed / stale / partial      4  reviewed, but findings are stale-only
+  5  codex errored — its last word is a failure notice; re-request
 
 EXAMPLES
   codex-grok-review status 123
@@ -579,6 +582,33 @@ clean_verdicts() {
         ] | sort_by(.at) | .[] | \"\\(.at)\\t\\(.sha)\\t\\(.who)\"" 2>/dev/null || true
 }
 
+# Codex failure notices — a crash posted where a review pass should have been:
+#
+#   Codex Review: Something went wrong. Try again later by commenting "@codex review".
+#
+# To every signal this script already reads, that comment is SILENCE: it carries
+# no badge, no clean phrase, no review object — so `status` answered
+# "awaiting: codex" and `wait` slept to its full timeout while the bot had
+# already said, in prose, that it crashed and wants to be re-asked. Observed on
+# solana-world-soccer-2026#688 (issuecomment-5352490610).
+#
+# Same two-endpoint rule as verdicts: nothing says the notice must stay an issue
+# comment, so reviews are merged in too. Emits one normalised ISO8601 timestamp
+# per notice, ascending — callers take the tail. Codex-only: Grok has not been
+# observed failing this way, and a Grok notice would need its own phrase anyway.
+codex_errors() {
+  local repo="$1" pr="$2" comments reviews
+  # Tolerated separately, so one unreachable endpoint cannot blank out the other.
+  comments="$(api_all "repos/$repo/issues/$pr/comments" 2>/dev/null || printf '[]')"
+  reviews="$(api_all "repos/$repo/pulls/$pr/reviews" 2>/dev/null || printf '[]')"
+  printf '%s\n%s\n' "$comments" "$reviews" \
+  | jq -rs "${JQ_REVIEWER_LIB}[ .[][]
+          | select(.user.login | is_codex)
+          | select(.body // \"\" | is_error_body)
+          | (.submitted_at // .created_at // \"\")
+        ] | sort | .[]" 2>/dev/null || true
+}
+
 # Has $3 filed a clean verdict naming commit $2, given the snapshot $1?
 #
 # Its LATEST verdict, not any of them: an older blessing does not cover code pushed
@@ -762,7 +792,7 @@ cmd_json() {
 verdict_key() {
   local open="$1" total="$2" reviews="$3" thumbs="$4" clean_line="$5" \
         head_clean_exists="$6" clean_sha="$7" issue_open="$8" \
-        missing_required="${9:-1}"
+        missing_required="${9:-1}" codex_errored="${10:-0}"
 
   # THE clean test, and it asks the policy — not the newest verdict on the PR.
   #
@@ -779,6 +809,15 @@ verdict_key() {
   # be read as clean.
   if [ "$open" -eq 0 ] && [ "$missing_required" -eq 0 ]; then
     echo clean-head; return 0
+  fi
+
+  # A failure notice as Codex's last word outranks every flavour of "waiting":
+  # not-reviewed, stale-clean and partial-clean all counsel patience or a fresh
+  # request, and patience is exactly wrong when the bot has already said it
+  # crashed. Open findings still outrank the error — they are actionable
+  # without Codex — which is why this sits inside the open==0 world.
+  if [ "$open" -eq 0 ] && [ "$codex_errored" -eq 1 ]; then
+    echo codex-errored; return 5
   fi
 
   # `total`, not just `issue_open`. An issue-comment finding leaves no review
@@ -997,6 +1036,20 @@ cmd_status() {
   latest="$(latest_review_date "$repo" "$pr")"
 
   clean="$(clean_verdicts "$repo" "$pr")"
+  # Is Codex's LAST word a failure notice? Compare its newest error against its
+  # newest real utterance — review object (latest_review_date is codex-only) or
+  # clean verdict. ISO8601 compares correctly as text. An error followed by any
+  # later codex word is history, not state.
+  local err_at codex_word err_live
+  err_at="$(codex_errors "$repo" "$pr" | tail -n 1)"
+  err_live=0
+  if [ -n "$err_at" ]; then
+    codex_word="$(printf '%s\n' "$clean" | awk -F'\t' '$3 == "codex" { t = $1 } END { print t }')"
+    if [ -n "$latest" ] && { [ -z "$codex_word" ] || [ "$latest" \> "$codex_word" ]; }; then
+      codex_word="$latest"
+    fi
+    if [ -z "$codex_word" ] || [ "$err_at" \> "$codex_word" ]; then err_live=1; fi
+  fi
   clean_line="$(printf '%s' "$clean" | tail -n 1)"
   clean_at="$(printf '%s' "$clean_line" | cut -f1)"
   clean_sha="$(printf '%s' "$clean_line" | cut -f2)"
@@ -1009,6 +1062,7 @@ cmd_status() {
   echo "  newest commit : ${head:-unknown}  ${head_sha:0:10}"
   echo "  codex reviews : $reviews${latest:+  (latest $latest)}"
   echo "  codex 👍       : $thumbs"
+  [ "$err_live" -eq 1 ] && echo "  codex error   : ⚠ failure notice at ${err_at} — nothing from codex since"
   if [ -n "$clean_sha" ]; then
     echo "  clean verdict : yes — reviewed commit ${clean_sha}  ($clean_at)"
   elif [ -n "$clean_line" ]; then
@@ -1026,7 +1080,7 @@ cmd_status() {
   code=0
   key="$(verdict_key "$open" "$(printf '%s' "$json" | jq 'length')" "$reviews" "$thumbs" \
         "$clean_line" "$clean_matches_head" "$clean_sha" "${issue_open:-0}" \
-        "$([ -n "$missing" ] && echo 1 || echo 0)")" || code=$?
+        "$([ -n "$missing" ] && echo 1 || echo 0)" "$err_live")" || code=$?
   total="$(printf '%s' "$json" | jq 'length')"
 
   case "$key" in
@@ -1035,6 +1089,9 @@ cmd_status() {
     not-reviewed)
       echo "  VERDICT       : NOT REVIEWED — no review, no 👍, no clean verdict."
       echo "                  Trigger one:  codex-grok-review request $pr" ;;
+    codex-errored)
+      echo "  VERDICT       : CODEX ERRORED — its last word is a failure notice (${err_at})."
+      echo "                  It asked to be re-asked:  codex-grok-review request $pr" ;;
     stale-clean)
       echo "  VERDICT       : STALE CLEAN VERDICT — it names ${clean_sha}, not the newest commit."
       echo "                  Newer commits are unreviewed:  codex-grok-review request $pr" ;;
@@ -1099,6 +1156,11 @@ cmd_wait() {
   local reviews_at_entry reviews_now
   reviews_at_entry="$(hashless_review_count "$repo" "$pr")" \
     || die "could not read the reviews of PR #$pr in $repo."
+  # Failure-notice watermark. Only a NEW notice ends the wait: one that predates
+  # this command was already reported by `status`, and the caller chose to wait
+  # anyway — presumably having just re-requested.
+  local err_at_entry err_now
+  err_at_entry="$(codex_errors "$repo" "$pr" | tail -n 1)"
   deadline="${CODEX_GROK_REVIEW_TIMEOUT:-${CODEX_REVIEW_TIMEOUT:-1800}}"
   interval="${CODEX_GROK_REVIEW_INTERVAL:-${CODEX_REVIEW_INTERVAL:-60}}"
   # A review pass is not always one post — Codex has been observed splitting
@@ -1119,6 +1181,16 @@ cmd_wait() {
       echo "Clean verdict for ${clean_sha}."
       cmd_status "$pr" || true
       return 0
+    fi
+    # A crash instead of a review. Without this check the notice is invisible to
+    # every signal below — no badge, no verdict, no review object — and `wait`
+    # sleeps out its full timeout on a bot that already said it will not answer.
+    # Exit 5 so a driving loop can distinguish "re-request" from "genuinely slow".
+    err_now="$(codex_errors "$repo" "$pr" | tail -n 1)"
+    if [ -n "$err_now" ] && [ "$err_now" != "$err_at_entry" ]; then
+      echo "Codex ERRORED instead of reviewing (${err_now}) — it asked to be re-requested."
+      cmd_status "$pr" || true
+      return 5
     fi
     # A review that names this commit — exact, whatever the clocks say.
     # A lookup that FAILED is not a lookup that found nothing. Swallowing it here
