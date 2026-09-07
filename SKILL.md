@@ -43,13 +43,18 @@ its last word is a failure notice; re-request (`wait` shares this one).
    `wait` returns `5` the moment a fresh notice lands, so a driving loop can
    re-`request` instead of waiting on a crash.
 
-1. **Findings live on two endpoints, and `gh pr view --json comments` shows neither
+1. **Findings live in three places, and `gh pr view --json comments` shows none of them
    completely.** Most are inline review comments (`gh api repos/O/R/pulls/N/comments`),
    but Codex also posts findings as plain issue comments
    (`gh api repos/O/R/issues/N/comments`) — same badge, same severity, but anchored by
    a blob permalink in the body instead of by `path`/`line`. Reading only the review
-   endpoint silently drops those; a P1 sat unread on PR #591 that way. The wrapper reads
-   both and normalises them into one list. The permalink is **optional** — jq's `capture`
+   endpoint silently drops those; a P1 sat unread on PR #591 that way. And the same
+   permalink-plus-badge body also arrives as the **body of a review object**
+   (`gh api repos/O/R/pulls/N/reviews`, `.body`) with no inline comment behind it and
+   no `Reviewed commit` line — two consecutive P2s on boardgame-engine PR #472 came that
+   way, and the wrapper answered "0 open, all stale, exit 4" over both. The wrapper reads
+   all three and normalises them into one list (`source`: `review`, `issue`,
+   `review-body`). The permalink is **optional** — jq's `capture`
    emits nothing on no match, so requiring it deletes the finding rather than leaving it
    unplaced. An unlocated finding is reported as `(location unknown)` and still blocks,
    going stale by date once the head moves past it (with no sha there is nothing else to
