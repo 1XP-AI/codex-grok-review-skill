@@ -248,6 +248,13 @@ review_shas() {
   # it through the count fallback while reviewed_head says nobody reviewed HEAD.
   # Only the part before the badge is searched, for the reason given in
   # fetch_issue_findings: the citation link after the rationale is not the code.
+  # A badge body with NO permalink still names its commit: the review object
+  # carries commit_id, which for a review does not move. Without that fallback
+  # such a finding landing between request and wait is hashless AND already
+  # inside reviews_at_entry, so neither of wait's signals fires and it runs to
+  # its timeout over a finding that has arrived (P1 on PR #8). Badge bodies
+  # only — an ordinary review that states no commit stays hashless, which is
+  # what the count fallback is for.
   api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[ .[]
           | select(.user.login | is_codex)
           | select(.body // \"\" | is_error_body | not)
@@ -255,6 +262,7 @@ review_shas() {
               value: (((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s)
                        // (.body // \"\" | sub(\"!\\\\[P[0-9] Badge\\\\][\\\\s\\\\S]*$\"; \"\")
                            | capture(\"blob/(?<s>[0-9a-f]{7,40})/\") | .s)
+                       // (if (.body // \"\" | is_badge_body) then (.commit_id // \"\") else \"\" end)
                        // \"\")) }
         ] | from_entries"
 }

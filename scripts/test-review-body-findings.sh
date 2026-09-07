@@ -149,7 +149,13 @@ check 'review_shas reads the permalink sha'         "$(s 2)" '5c1bb37016983a2b4c
 check 'Reviewed-commit line still wins where present' "$(s 4)" '225da8ebb5'
 check 'clean verdict keeps its hash'                "$(s 5)" 'fc5b5c2e25'
 check 'a crash notice yields no sha entry'          "$(printf '%s' "$SHAS" | jq -r 'has("6")')" 'false'
-check 'a permalink-less body is hashless here'      "$(s 7)" ''
+# A badge body with no permalink still names its commit via the review object.
+# Left hashless, such a finding landing between request and wait is neither
+# recognised by reviewed_head nor counted as new by the hashless fallback (it is
+# already inside reviews_at_entry), and wait runs to its timeout (P1 on PR #8).
+check 'a permalink-less badge body takes commit_id' "$(s 7)" "$HEAD_SHA"
+check 'a hash-less ordinary review stays hashless' \
+  "$(REVIEWS='[{"id":1,"user":{"login":"chatgpt-codex-connector[bot]"},"submitted_at":"2026-09-07T05:00:40Z","commit_id":"abc","body":"### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request."}]' review_shas O/R 1 | jq -r '."1"')" ''
 check 'a cited AGENTS.md link after the badge is not the sha' \
   "$(REVIEWS='[{"id":1,"user":{"login":"chatgpt-codex-connector[bot]"},"submitted_at":"2026-09-07T05:00:40Z","body":"**<sub>![P2 Badge](x)</sub> T**\n\nr\n\nAGENTS.md reference: [a](https://github.com/O/R/blob/deadbee1234/AGENTS.md#L1)"}]' review_shas O/R 1 | jq -r '."1"')" ''
 
