@@ -8,7 +8,7 @@ composing `gh` calls by hand.
 
 ## Rules
 
-1. **Findings arrive on two endpoints. Read both.** Most are *inline review comments*
+1. **Findings arrive in three shapes. Read all of them.** Most are *inline review comments*
    (`gh api repos/OWNER/REPO/pulls/N/comments`) — `gh pr view --json comments` carries
    only issue comments, so the bot is simply absent from it. But Codex also files
    findings as issue comments (`gh api repos/OWNER/REPO/issues/N/comments`), same badge
@@ -27,7 +27,20 @@ composing `gh` calls by hand.
    ```
 
    Reading only the review endpoint drops these silently — the wrapper reported CLEAN on
-   a PR carrying an open P1 until it learned to read both. Three things about that shape
+   a PR carrying an open P1 until it learned to read both.
+
+   The **same body also arrives as a review object** (`gh api repos/OWNER/REPO/pulls/N/reviews`,
+   field `.body`): `### 💡 Codex Review`, the permalink, the badge, the title, the
+   rationale — submitted as a review, so it has `submitted_at` and `commit_id`, carries
+   no `Reviewed commit` line, and leaves no inline comment. Reading review bodies only for
+   the `Reviewed commit` hash drops these too. Measured on 1XP-AI/boardgame-engine PR
+   #472: two consecutive passes (`50e8013`, `5c1bb37`) each carried one P2 this way,
+   `pulls/472/comments` held neither, and `status` answered "0 open findings … all
+   stale, exit 4 — confirm they are addressed, then merge". One parser reads all three
+   shapes; a review body with no permalink is placed in time by the review's own
+   `commit_id`, which unlike a comment's does not move.
+
+   Three things about the permalink shape
    are load-bearing, and all three were got wrong first:
 
    - The **permalink precedes the badge**, and carries the path, the line (`#L169`, or a
@@ -212,7 +225,16 @@ gh api repos/O/R/pulls/N/comments  -q '.[] | "\(.commit_id[0:10]) vs \(.original
 
 # Findings filed as issue comments — invisible to every probe above.
 gh api repos/O/R/issues/N/comments -q '[.[] | select(.body | test("!\\[P[0-9] Badge\\]"))] | length'
+
+# Findings filed as the BODY of a review object — invisible to all of the above too.
+gh api repos/O/R/pulls/N/reviews   -q '[.[] | select(.body // "" | test("!\\[P[0-9] Badge\\]"))] | length'
 ```
+
+That last probe is how the third shape was found. On `1XP-AI/boardgame-engine` PR #472 it
+printed `2` while `pulls/472/comments` held no comment with either title and the wrapper's
+`all 472` listed neither — two P2s (`Keep the public-boundary check in unit coverage`,
+`Keep the non-E2E boundary check in the unit project`) that `status` had reported as
+"all stale, confirm addressed, then merge".
 
 That last probe is how the two-endpoint rule was found. On `1XP-AI/solana-world-soccer-2026`
 PR #591 it printed `1` while `pulls/591/comments` held no live finding at all — a P1

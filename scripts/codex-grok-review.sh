@@ -242,11 +242,20 @@ review_shas() {
   # "Review landed." and settle_and_report returned 0 over a status of 5
   # (P2 on PR #7). A crash is not a review — filter it here, the one source
   # reviewed_head and hashless_review_count both read.
+  # A review whose BODY is the finding (blob permalink + badge, no "Reviewed
+  # commit" line — see fetch_review_body_findings) names its commit in the URL
+  # instead. Read that too, or such a review is "hashless" and wait only notices
+  # it through the count fallback while reviewed_head says nobody reviewed HEAD.
+  # Only the part before the badge is searched, for the reason given in
+  # fetch_issue_findings: the citation link after the rationale is not the code.
   api_all "repos/$1/pulls/$2/reviews" | jq -r "${JQ_REVIEWER_LIB}[ .[]
           | select(.user.login | is_codex)
           | select(.body // \"\" | is_error_body | not)
           | { key: (.id | tostring),
-              value: ((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s) // \"\") }
+              value: (((.body | capture(\"Reviewed commit:\\\\*\\\\*\\\\s*\`(?<s>[0-9a-f]+)\`\") | .s)
+                       // (.body // \"\" | sub(\"!\\\\[P[0-9] Badge\\\\][\\\\s\\\\S]*$\"; \"\")
+                           | capture(\"blob/(?<s>[0-9a-f]{7,40})/\") | .s)
+                       // \"\")) }
         ] | from_entries"
 }
 
@@ -272,9 +281,12 @@ review_shas() {
 # and the line are all in the URL, so staleness here is exact rather than dated.
 fetch_issue_findings() {
   # $4 (head_date) is optional. `wait` has no date to give — see issue_findings_now.
-  local repo="$1" head_sha="$2" head_date="${4:-}"
-  api_all "repos/$repo/issues/$3/comments" \
-  | jq --arg head "$head_sha" --arg headdate "$head_date" "${JQ_REVIEWER_LIB}"'
+  # $5 (endpoint, relative to the repo) and $6 (source label) let the SAME parser
+  # read review-object bodies — see fetch_review_body_findings. They default to
+  # the issue-comment endpoint so every existing caller is unchanged.
+  local repo="$1" head_sha="$2" head_date="${4:-}" endpoint="${5:-issues/$3/comments}" source="${6:-issue}"
+  api_all "repos/$repo/$endpoint" \
+  | jq --arg head "$head_sha" --arg headdate "$head_date" --arg source "$source" "${JQ_REVIEWER_LIB}"'
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
       def _hv: {"0":0,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,
                 "a":10,"b":11,"c":12,"d":13,"e":14,"f":15}[ascii_downcase];
@@ -398,13 +410,20 @@ fetch_issue_findings() {
         | {
             id: $c.id,
             review_id: ($c.id | tostring),
-            created_at: $c.created_at,
+            # Review objects date with submitted_at, issue comments with created_at.
+            created_at: ($c.created_at // $c.submitted_at // ""),
             path: ($loc.path | uridecode),
             line: (($loc.b // $loc.a) | tonumber),
             start_line: (if $loc.b == null then null else ($loc.a | tonumber) end),
-            source: "issue",
+            source: $source,
             anchored: true,
-            reviewed_sha: $loc.sha,
+            # A review object also carries the commit it was submitted against, and
+            # unlike the commit_id of a comment it does not move. Fall back to it
+            # when the body has no permalink. An issue comment has no such field,
+            # so this stays empty there and the date watermark applies as before.
+            # (No apostrophes in this block: the jq program is a single-quoted
+            # shell string, so one ends it.)
+            reviewed_sha: (if $loc.sha != "" then $loc.sha else ($c.commit_id // "") end),
             severity: (($c.body | capture("!\\[(?<sev>P[0-9]) Badge\\]") | .sev) // "—"),
             title: $title,
             rationale: $rationale,
@@ -439,11 +458,33 @@ fetch_issue_findings() {
       ]'
 }
 
+# Findings Codex posts as the BODY of a review object — a third shape.
+#
+# Same layout as the issue-comment form (a `### 💡 Codex Review` heading, the
+# blob permalink, the badge, the title, the rationale) but submitted as a review,
+# so it has `submitted_at` and `commit_id` and no inline comment behind it. To
+# this reader it was invisible: `review_shas` read the body only for a
+# "Reviewed commit" line (which this shape does not carry), `fetch_findings` read
+# the review COMMENTS endpoint, and `fetch_issue_findings` read issue comments.
+# Measured on 1XP-AI/boardgame-engine PR #472: two consecutive review passes
+# (50e8013, 5c1bb37) each carried one P2 this way, `pulls/472/comments` held
+# neither, and `status` answered "0 open findings … all stale, exit 4" — the
+# caller was told to merge over an open P2, twice.
+#
+# One parser, three sources. The permalink rules (optional, pre-badge, ranged)
+# are the ones fetch_issue_findings documents; only the endpoint and the label
+# differ.
+fetch_review_body_findings() {
+  fetch_issue_findings "$1" "$2" "$3" "${4:-}" "pulls/$3/reviews" review-body
+}
+
 fetch_findings() {
-  local repo="$1" pr="$2" head_date="$3" head_sha="$4" shamap extra
+  local repo="$1" pr="$2" head_date="$3" head_sha="$4" shamap extra bodies
   shamap="$(review_shas "$repo" "$pr")"
   # Findings that arrived as issue comments, in the same shape.
   extra="$(fetch_issue_findings "$repo" "$head_sha" "$pr" "$head_date")"
+  # And the ones that arrived as the body of a review object.
+  bodies="$(fetch_review_body_findings "$repo" "$head_sha" "$pr" "$head_date")"
   api_all "repos/$repo/pulls/$pr/comments" | jq -r "${JQ_REVIEWER_LIB}[ .[] | select(is_finding_author) ]" \
   | jq --argjson shas "$shamap" --arg head "$head_sha" --arg headdate "$head_date" '
       def trim: sub("^\\s+"; "") | sub("\\s+$"; "");
@@ -513,14 +554,14 @@ fetch_findings() {
             )
           }
       ]' \
-  | jq --slurpfile extra <(printf '%s' "$extra") '
-      # Two sources, one list. A finding is a finding whichever way it arrived.
+  | jq --slurpfile extra <(printf '%s' "$extra") --slurpfile bodies <(printf '%s' "$bodies") '
+      # Three sources, one list. A finding is a finding whichever way it arrived.
       #
       # --slurpfile, not --argjson: argv values pass through execve, which caps a
       # SINGLE argument at 128KB on Linux. Each finding carries its whole comment
       # body, so a busy PR crosses that and the merge dies with E2BIG — on the
       # PR that needs it most. A pipe has no such ceiling.
-      . + $extra[0] | sort_by(.created_at) | reverse'
+      . + $extra[0] + $bodies[0] | sort_by(.created_at) | reverse'
 }
 
 # Codex leaves NO review object when it has nothing to say — it reacts 👍 on the
@@ -753,8 +794,10 @@ hashless_review_count() {
 # the verdict table to `clean`, exit 0 — a P1 reported as a clean PR. One snapshot
 # cannot disagree with itself.
 issue_open_in() {
+  # "issue" and "review-body" alike: what this count means to verdict_key is
+  # "live findings the review-comments endpoint knows nothing about".
   printf '%s' "$1" \
-    | jq '[ .[] | select(.source == "issue" and .stale == false and .anchored == true) ] | length'
+    | jq '[ .[] | select(.source != "review" and .stale == false and .anchored == true) ] | length'
 }
 
 # The same count, fetched, for `wait` — which holds no snapshot to be consistent

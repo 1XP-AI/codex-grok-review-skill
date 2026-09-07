@@ -40,6 +40,16 @@ gh api repos/OWNER/REPO/issues/123/comments \
 # 1   ← a P1 that pulls/123/comments never mentions
 ```
 
+**And there is a third place.** The same permalink-plus-badge body also arrives as the
+**body of a review object** — no inline comment behind it, no `Reviewed commit` line:
+
+```bash
+# 1XP-AI/boardgame-engine PR #472: two consecutive passes, one P2 each, this way.
+gh api repos/OWNER/REPO/pulls/472/reviews \
+  -q '[.[] | select(.body // "" | test("!\\[P[0-9] Badge\\]"))] | length'
+# 2   ← neither on pulls/472/comments; the wrapper said "0 open, all stale, exit 4"
+```
+
 That is not hypothetical: it is how this wrapper came to report `CLEAN` on a PR with an
 open P1. Both endpoints have to be read and merged, which is what the wrapper does.
 
